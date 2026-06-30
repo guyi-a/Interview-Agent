@@ -20,6 +20,9 @@ func NewProjectHandler(svc *service.ProjectService) *ProjectHandler {
 func (h *ProjectHandler) Register(r *gin.Engine) {
 	r.GET("/projects", h.List)
 	r.GET("/projects/:id", h.Get)
+	r.PATCH("/projects/:id", h.Update)
+	r.DELETE("/projects/:id", h.Delete)
+	r.POST("/projects/:id/open", h.Open)
 }
 
 type projectItem struct {
@@ -64,4 +67,42 @@ func (h *ProjectHandler) Get(c *gin.Context) {
 		Workspace: p.Workspace,
 		UpdatedAt: p.UpdatedAt.Format(time.RFC3339),
 	})
+}
+
+type updateProjectRequest struct {
+	Name string `json:"name" binding:"required"`
+}
+
+func (h *ProjectHandler) Update(c *gin.Context) {
+	id := c.Param("id")
+	var req updateProjectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.svc.Rename(c.Request.Context(), id, req.Name); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *ProjectHandler) Delete(c *gin.Context) {
+	id := c.Param("id")
+	if err := h.svc.Delete(c.Request.Context(), id); err != nil {
+		// 200 with warning instead of 500: DB row is gone, this is just a
+		// filesystem cleanup error worth surfacing.
+		c.JSON(http.StatusOK, gin.H{"warning": err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *ProjectHandler) Open(c *gin.Context) {
+	id := c.Param("id")
+	if err := h.svc.OpenInFinder(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

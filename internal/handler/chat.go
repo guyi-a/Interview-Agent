@@ -42,7 +42,7 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		return
 	}
 
-	buf, err := h.chat.Start(c.Request.Context(), id, req.Message)
+	buf, err := h.chat.Start(c.Request.Context(), id, req.Message, c.Query("project_id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

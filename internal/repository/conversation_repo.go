@@ -60,6 +60,16 @@ func (r *ConversationRepo) SetProjectID(ctx context.Context, conversationID, pro
 		Update("project_id", projectID).Error
 }
 
+// ListByProject returns all conversations belonging to a project.
+func (r *ConversationRepo) ListByProject(ctx context.Context, projectID string) ([]model.Conversation, error) {
+	var out []model.Conversation
+	err := r.db.WithContext(ctx).
+		Where("project_id = ?", projectID).
+		Order("updated_at DESC").
+		Find(&out).Error
+	return out, err
+}
+
 // List returns conversations ordered by updated_at desc (sidebar order).
 func (r *ConversationRepo) List(ctx context.Context, limit int) ([]model.Conversation, error) {
 	var out []model.Conversation

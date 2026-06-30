@@ -104,7 +104,10 @@ export type ProjectBoundEvent = {
 
 export function useChatStream(
   conversationID: string,
-  opts?: { onProjectBound?: (e: ProjectBoundEvent) => void },
+  opts?: {
+    onProjectBound?: (e: ProjectBoundEvent) => void;
+    projectId?: string;
+  },
 ) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [loading, setLoading] = useState(true);
@@ -113,6 +116,8 @@ export function useChatStream(
   const abortRef = useRef<AbortController | null>(null);
   const onProjectBoundRef = useRef(opts?.onProjectBound);
   onProjectBoundRef.current = opts?.onProjectBound;
+  const projectIdRef = useRef(opts?.projectId);
+  projectIdRef.current = opts?.projectId;
 
   useEffect(() => {
     let cancelled = false;
@@ -206,7 +211,9 @@ export function useChatStream(
       };
 
       try {
-        const res = await postChat(conversationID, trimmed, controller.signal);
+        const res = await postChat(conversationID, trimmed, controller.signal, {
+          projectId: projectIdRef.current,
+        });
         if (!res.ok || !res.body) {
           throw new Error(`POST /chat: ${res.status}`);
         }

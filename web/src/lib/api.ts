@@ -46,6 +46,38 @@ export async function listProjects(): Promise<ProjectItem[]> {
   return data.projects ?? [];
 }
 
+export async function renameProject(id: string, name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`renameProject: ${res.status}`);
+  }
+}
+
+export async function deleteProject(id: string): Promise<{ warning?: string }> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (res.status === 204) return {};
+  if (res.status === 200) {
+    return (await res.json()) as { warning?: string };
+  }
+  throw new Error(`deleteProject: ${res.status}`);
+}
+
+export async function openProjectInFinder(id: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/projects/${encodeURIComponent(id)}/open`,
+    { method: "POST" },
+  );
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`openProjectInFinder: ${res.status}`);
+  }
+}
+
 export async function listMessages(id: string): Promise<PersistedMessage[]> {
   const res = await fetch(
     `${API_BASE}/conversations/${encodeURIComponent(id)}/messages`,
@@ -69,8 +101,12 @@ export async function postChat(
   id: string,
   message: string,
   signal: AbortSignal,
+  opts?: { projectId?: string },
 ): Promise<Response> {
-  return fetch(`${API_BASE}/chat/${encodeURIComponent(id)}`, {
+  const qs = opts?.projectId
+    ? `?project_id=${encodeURIComponent(opts.projectId)}`
+    : "";
+  return fetch(`${API_BASE}/chat/${encodeURIComponent(id)}${qs}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),

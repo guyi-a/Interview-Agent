@@ -24,6 +24,7 @@ type ChatService struct {
 	manager     *stream.Manager
 	convRepo    *repository.ConversationRepo
 	msgRepo     *repository.MessageRepo
+	projectRepo *repository.ProjectRepo
 }
 
 func NewChatService(
@@ -31,12 +32,14 @@ func NewChatService(
 	manager *stream.Manager,
 	convRepo *repository.ConversationRepo,
 	msgRepo *repository.MessageRepo,
+	projectRepo *repository.ProjectRepo,
 ) *ChatService {
 	return &ChatService{
-		agent:    ag,
-		manager:  manager,
-		convRepo: convRepo,
-		msgRepo:  msgRepo,
+		agent:       ag,
+		manager:     manager,
+		convRepo:    convRepo,
+		msgRepo:     msgRepo,
+		projectRepo: projectRepo,
 	}
 }
 
@@ -58,12 +61,27 @@ func (s *ChatService) Cancel(id string) bool {
 
 // Start begins (or continues) a chat turn:
 //   - ensures conversation row exists
+//   - if projectID is provided AND the conversation is new (or unbound), binds it
 //   - loads prior messages as context
 //   - persists the new user message
 //   - kicks off the Agent in a goroutine, persists assistant reply when done
-func (s *ChatService) Start(ctx context.Context, id, userMsg string) (*stream.StreamBuffer, error) {
+func (s *ChatService) Start(ctx context.Context, id, userMsg, projectID string) (*stream.StreamBuffer, error) {
 	if err := s.convRepo.Upsert(ctx, id); err != nil {
 		return nil, err
+	}
+
+	if projectID != "" {
+		conv, err := s.convRepo.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		// Only bind when conversation has no project yet — silently ignore the
+		// query param if it's already bound to a different (or same) project.
+		if conv != nil && (conv.ProjectID == nil || *conv.ProjectID == "") {
+			if err := s.convRepo.SetProjectID(ctx, id, projectID); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	prior, err := s.msgRepo.List(ctx, id)
@@ -72,6 +90,9 @@ func (s *ChatService) Start(ctx context.Context, id, userMsg string) (*stream.St
 	}
 
 	history := toSchemaMessages(prior)
+	if workspaceContext := s.workspaceContext(ctx, id); workspaceContext != "" {
+		history = append([]*schema.Message{schema.SystemMessage(workspaceContext)}, history...)
+	}
 	history = append(history, schema.UserMessage(userMsg))
 
 	if err := s.msgRepo.Append(ctx, &model.Message{
@@ -93,6 +114,21 @@ func (s *ChatService) Start(ctx context.Context, id, userMsg string) (*stream.St
 	go s.runAgent(runCtx, id, history, buf)
 
 	return buf, nil
+}
+
+func (s *ChatService) workspaceContext(ctx context.Context, convID string) string {
+	if s.projectRepo == nil {
+		return ""
+	}
+	conv, err := s.convRepo.Get(ctx, convID)
+	if err != nil || conv == nil || conv.ProjectID == nil || *conv.ProjectID == "" {
+		return "当前会话未绑定工作区。用户要求读写文件时，先调用 create_workspace 创建工作区。"
+	}
+	project, err := s.projectRepo.Get(ctx, *conv.ProjectID)
+	if err != nil || project == nil {
+		return "当前会话绑定的工作区记录不存在。用户要求读写文件时，先说明工作区不可用。"
+	}
+	return "当前会话已绑定工作区。project_id=" + project.ID + "，project_name=" + project.Name + "，workspace=" + project.Workspace + "。用户询问当前项目/工作区/文件时，直接调用 list_files/read_file/write_file/edit_file/mkdir 等文件工具，不要先询问是否已挂载工作区。"
 }
 
 func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schema.Message, buf *stream.StreamBuffer) {

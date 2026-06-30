@@ -11,7 +11,11 @@ export function Conversation() {
   if (!id) return null;
 
   const location = useLocation();
-  const pending = (location.state as { pending?: string } | null)?.pending;
+  const state = location.state as
+    | { pending?: string; projectId?: string }
+    | null;
+  const pending = state?.pending;
+  const projectId = state?.projectId;
 
   const touch = useConversationStore((s) => s.touch);
   const refreshConvs = useConversationStore((s) => s.refresh);
@@ -27,10 +31,11 @@ export function Conversation() {
 
   const { turns, loading, streaming, send, cancel } = useChatStream(id, {
     onProjectBound,
+    projectId,
   });
 
   const onSend = async (text: string) => {
-    touch(id, text.slice(0, 20));
+    touch(id, text.slice(0, 20), { projectId });
     await send(text);
     refreshConvs();
     refreshProjects();

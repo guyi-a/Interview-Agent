@@ -10,7 +10,7 @@ interface ConversationStore {
   loading: boolean;
   refresh: () => Promise<void>;
   remove: (id: string) => Promise<void>;
-  touch: (id: string, title?: string) => void;
+  touch: (id: string, title?: string, opts?: { projectId?: string }) => void;
 }
 
 export const useConversationStore = create<ConversationStore>((set, get) => ({
@@ -39,7 +39,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     }
   },
 
-  touch: (id, title) => {
+  touch: (id, title, opts) => {
     const now = new Date().toISOString();
     const existing = get().items.find((c) => c.id === id);
     if (existing) {
@@ -47,6 +47,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
         ...existing,
         updated_at: now,
         ...(title !== undefined ? { title } : {}),
+        ...(opts?.projectId !== undefined ? { project_id: opts.projectId } : {}),
       };
       set({
         items: [updated, ...get().items.filter((c) => c.id !== id)],
@@ -54,7 +55,12 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     } else {
       set({
         items: [
-          { id, title: title ?? "", updated_at: now },
+          {
+            id,
+            title: title ?? "",
+            updated_at: now,
+            project_id: opts?.projectId ?? null,
+          },
           ...get().items,
         ],
       });

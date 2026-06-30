@@ -93,9 +93,9 @@ func main() {
 	}
 
 	manager := stream.NewManager()
-	chatService := service.NewChatService(ag, manager, convRepo, msgRepo)
+	chatService := service.NewChatService(ag, manager, convRepo, msgRepo, projectRepo)
 	convService := service.NewConversationService(convRepo, msgRepo, manager)
-	projectService := service.NewProjectService(projectRepo)
+	projectService := service.NewProjectService(projectRepo, convRepo, manager, absWorkspaceRoot)
 
 	chatHandler := handler.NewChatHandler(chatService)
 	convHandler := handler.NewConversationHandler(convService)
