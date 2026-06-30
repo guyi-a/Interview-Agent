@@ -45,3 +45,12 @@ coverage/
 tmp/
 temp/
 *.tmp
+
+# Project local data
+*.db
+*.db-shm
+*.db-wal
+.workspace/
+
+# TypeScript incremental build info
+*.tsbuildinfo
