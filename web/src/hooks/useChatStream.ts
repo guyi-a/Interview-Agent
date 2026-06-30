@@ -83,18 +83,36 @@ function fromPersisted(rows: PersistedMessage[]): ChatTurn[] {
       role: r.role as "user" | "assistant",
       content: r.content,
       reasoning: r.reasoning_content ?? "",
-      tools: [],
+      tools: (r.tools ?? []).map((t) => ({
+        id: t.id,
+        name: t.name,
+        argsJson: t.args_json ?? "",
+        status: t.ok ? ("ok" as const) : ("error" as const),
+        content: t.content,
+        error: t.error,
+      })),
       createdAt: r.created_at,
       done: true,
     }));
 }
 
-export function useChatStream(conversationID: string) {
+export type ProjectBoundEvent = {
+  projectId: string;
+  projectName: string;
+  workspacePath: string;
+};
+
+export function useChatStream(
+  conversationID: string,
+  opts?: { onProjectBound?: (e: ProjectBoundEvent) => void },
+) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [loading, setLoading] = useState(true);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const onProjectBoundRef = useRef(opts?.onProjectBound);
+  onProjectBoundRef.current = opts?.onProjectBound;
 
   useEffect(() => {
     let cancelled = false;
@@ -238,7 +256,13 @@ export function useChatStream(conversationID: string) {
                 }
                 break;
               case "project_bound":
-                // PR B handles this; ignore for PR A
+                if (f.project_id) {
+                  onProjectBoundRef.current?.({
+                    projectId: f.project_id,
+                    projectName: f.project_name ?? "",
+                    workspacePath: f.workspace_path ?? "",
+                  });
+                }
                 break;
               case "usage":
                 break;

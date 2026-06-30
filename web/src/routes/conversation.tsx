@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useLocation, useParams } from "react-router";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useConversationStore } from "@/stores/conversations";
+import { useProjectStore } from "@/stores/projects";
 import { Transcript } from "@/features/chat/Transcript";
 import { PromptInput } from "@/features/chat/PromptInput";
 
@@ -13,13 +14,26 @@ export function Conversation() {
   const pending = (location.state as { pending?: string } | null)?.pending;
 
   const touch = useConversationStore((s) => s.touch);
-  const refresh = useConversationStore((s) => s.refresh);
-  const { turns, loading, streaming, send, cancel } = useChatStream(id);
+  const refreshConvs = useConversationStore((s) => s.refresh);
+  const refreshProjects = useProjectStore((s) => s.refresh);
+
+  const onProjectBound = useCallback(() => {
+    // Conversation just got bound to a project — refresh both stores so
+    // the sidebar can immediately move this item from Ad-hoc to the new
+    // project group, mid-stream.
+    refreshConvs();
+    refreshProjects();
+  }, [refreshConvs, refreshProjects]);
+
+  const { turns, loading, streaming, send, cancel } = useChatStream(id, {
+    onProjectBound,
+  });
 
   const onSend = async (text: string) => {
     touch(id, text.slice(0, 20));
     await send(text);
-    refresh();
+    refreshConvs();
+    refreshProjects();
   };
 
   const pendingFiredRef = useRef(false);

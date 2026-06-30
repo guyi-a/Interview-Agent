@@ -13,6 +13,7 @@ func NewDB(dsn string) (*gorm.DB, error) {
 		return nil, err
 	}
 	if err := db.AutoMigrate(
+		&model.Project{},
 		&model.Conversation{},
 		&model.Message{},
 	); err != nil {

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/cloudwego/eino/callbacks"
@@ -42,6 +44,95 @@ type Frame struct {
 	Total  int `json:"total,omitempty"`
 }
 
+// ToolEventRecord is the persisted shape of one tool call within an agent run.
+// Stored as a JSON array on message.Extra so the frontend can re-render tool
+// cards when the conversation is reloaded from history.
+type ToolEventRecord struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ArgsJSON string `json:"args_json,omitempty"`
+	OK       bool   `json:"ok"`
+	Content  string `json:"content,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// RunCollector accumulates the full record of a single agent run so the
+// service layer can persist it. It captures:
+//   - all ChatModel rounds' content + reasoning chunks (concatenated)
+//   - all tool call / result events in order
+//
+// Thread safety: a single mutex guards all fields. The internal WaitGroup
+// tracks pending OnEndWithStreamOutputFn goroutines so callers can Wait()
+// for the run to fully drain before persisting.
+type RunCollector struct {
+	mu        sync.Mutex
+	wg        sync.WaitGroup
+	content   strings.Builder
+	reasoning strings.Builder
+	tools     []ToolEventRecord
+}
+
+func NewRunCollector() *RunCollector {
+	return &RunCollector{}
+}
+
+func (c *RunCollector) Wait() {
+	c.wg.Wait()
+}
+
+func (c *RunCollector) Content() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.content.String()
+}
+
+func (c *RunCollector) Reasoning() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reasoning.String()
+}
+
+func (c *RunCollector) Tools() []ToolEventRecord {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.tools) == 0 {
+		return nil
+	}
+	out := make([]ToolEventRecord, len(c.tools))
+	copy(out, c.tools)
+	return out
+}
+
+func (c *RunCollector) appendContent(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.content.WriteString(s)
+}
+
+func (c *RunCollector) appendReasoning(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reasoning.WriteString(s)
+}
+
+func (c *RunCollector) startTool(id, name, args string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tools = append(c.tools, ToolEventRecord{ID: id, Name: name, ArgsJSON: args})
+}
+
+func (c *RunCollector) finishLastTool(ok bool, content, errMsg string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.tools) == 0 {
+		return
+	}
+	last := &c.tools[len(c.tools)-1]
+	last.OK = ok
+	last.Content = content
+	last.Error = errMsg
+}
+
 // Encode serializes a Frame into an SSE-formatted `data: ...\n\n` byte slice.
 // Exported so other packages (tools) can push frames directly into a buffer.
 func Encode(f Frame) []byte {
@@ -60,9 +151,13 @@ func boolPtr(b bool) *bool { return &b }
 // events into SSE frames written to buf. Tool call IDs are allocated by a
 // per-handler counter (one handler per agent run / per stream).
 //
+// If collector is non-nil, the same events are also accumulated into the
+// collector so the caller can persist a full record of the run after
+// collector.Wait() returns.
+//
 // Buf lifecycle (finish / error semantics) is managed by the caller; this
 // handler only appends frames.
-func NewSSEHandler(buf *StreamBuffer) callbacks.Handler {
+func NewSSEHandler(buf *StreamBuffer, collector *RunCollector) callbacks.Handler {
 	var toolCounter int64
 	var lastToolID atomic.Value // string — id of the in-flight tool call
 
@@ -84,6 +179,9 @@ func NewSSEHandler(buf *StreamBuffer) callbacks.Handler {
 				Name:     info.Name,
 				ArgsJSON: args,
 			}))
+			if collector != nil {
+				collector.startTool(id, info.Name, args)
+			}
 			return ctx
 		}).
 		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
@@ -103,6 +201,9 @@ func NewSSEHandler(buf *StreamBuffer) callbacks.Handler {
 				OK:      boolPtr(true),
 				Content: content,
 			}))
+			if collector != nil {
+				collector.finishLastTool(true, content, "")
+			}
 			return ctx
 		}).
 		OnEndWithStreamOutputFn(func(ctx context.Context, info *callbacks.RunInfo, sr *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
@@ -110,7 +211,15 @@ func NewSSEHandler(buf *StreamBuffer) callbacks.Handler {
 				sr.Close()
 				return ctx
 			}
+			if collector != nil {
+				collector.wg.Add(1)
+			}
 			go func() {
+				defer func() {
+					if collector != nil {
+						collector.wg.Done()
+					}
+				}()
 				defer sr.Close()
 				for {
 					raw, err := sr.Recv()
@@ -127,9 +236,15 @@ func NewSSEHandler(buf *StreamBuffer) callbacks.Handler {
 					}
 					if mo.Message.ReasoningContent != "" {
 						buf.Append(Encode(Frame{Type: "thinking", Content: mo.Message.ReasoningContent}))
+						if collector != nil {
+							collector.appendReasoning(mo.Message.ReasoningContent)
+						}
 					}
 					if mo.Message.Content != "" {
 						buf.Append(Encode(Frame{Type: "text", Content: mo.Message.Content}))
+						if collector != nil {
+							collector.appendContent(mo.Message.Content)
+						}
 					}
 					if mo.TokenUsage != nil {
 						buf.Append(Encode(Frame{
@@ -153,6 +268,9 @@ func NewSSEHandler(buf *StreamBuffer) callbacks.Handler {
 					OK:    boolPtr(false),
 					Error: err.Error(),
 				}))
+				if collector != nil {
+					collector.finishLastTool(false, "", err.Error())
+				}
 				return ctx
 			}
 			buf.Append(Encode(Frame{Type: "error", Message: err.Error()}))

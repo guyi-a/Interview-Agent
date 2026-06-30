@@ -52,6 +52,14 @@ func (r *ConversationRepo) SetTitleIfEmpty(ctx context.Context, id, title string
 		Update("title", title).Error
 }
 
+// SetProjectID attaches a conversation to a project. Idempotent — caller is
+// responsible for ensuring the project exists.
+func (r *ConversationRepo) SetProjectID(ctx context.Context, conversationID, projectID string) error {
+	return r.db.WithContext(ctx).Model(&model.Conversation{}).
+		Where("id = ?", conversationID).
+		Update("project_id", projectID).Error
+}
+
 // List returns conversations ordered by updated_at desc (sidebar order).
 func (r *ConversationRepo) List(ctx context.Context, limit int) ([]model.Conversation, error) {
 	var out []model.Conversation

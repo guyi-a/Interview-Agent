@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/guyi-a/Interview-Agent/internal/agent/contextkey"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/repository/model"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
@@ -94,7 +96,11 @@ func (s *ChatService) Start(ctx context.Context, id, userMsg string) (*stream.St
 }
 
 func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schema.Message, buf *stream.StreamBuffer) {
-	cb := stream.NewSSEHandler(buf)
+	ctx = contextkey.WithConversationID(ctx, convID)
+	ctx = contextkey.WithBuffer(ctx, buf)
+
+	collector := stream.NewRunCollector()
+	cb := stream.NewSSEHandler(buf, collector)
 	sr, err := s.agent.Stream(ctx, msgs,
 		agent.WithComposeOptions(compose.WithCallbacks(cb)),
 	)
@@ -105,15 +111,24 @@ func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schem
 	}
 	defer sr.Close()
 
-	var content, reasoning strings.Builder
 	for {
-		chunk, err := sr.Recv()
+		_, err := sr.Recv()
 		if errors.Is(err, io.EOF) {
+			collector.Wait()
+			extra := ""
+			if tools := collector.Tools(); len(tools) > 0 {
+				if data, jerr := json.Marshal(map[string]any{"tools": tools}); jerr == nil {
+					extra = string(data)
+				} else {
+					log.Printf("marshal tools: %v", jerr)
+				}
+			}
 			if err := s.msgRepo.Append(context.Background(), &model.Message{
 				ConversationID:   convID,
 				Role:             string(schema.Assistant),
-				Content:          content.String(),
-				ReasoningContent: reasoning.String(),
+				Content:          collector.Content(),
+				ReasoningContent: collector.Reasoning(),
+				Extra:            extra,
 			}); err != nil {
 				log.Printf("persist assistant message: %v", err)
 			}
@@ -126,11 +141,8 @@ func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schem
 			stream.FinalizeErr(buf, err)
 			return
 		}
-		if chunk == nil {
-			continue
-		}
-		content.WriteString(chunk.Content)
-		reasoning.WriteString(chunk.ReasoningContent)
+		// chunk discarded: the collector (via callback) is the source of truth
+		// for persistence; we only drain here to keep the eino pipeline moving.
 	}
 }
 

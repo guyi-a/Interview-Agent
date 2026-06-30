@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/guyi-a/Interview-Agent/internal/repository/model"
 	"github.com/guyi-a/Interview-Agent/internal/service"
+	"github.com/guyi-a/Interview-Agent/internal/stream"
 )
 
 type ConversationHandler struct {
@@ -26,9 +28,10 @@ func (h *ConversationHandler) Register(r *gin.Engine) {
 }
 
 type conversationListItem struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	UpdatedAt string `json:"updated_at"`
+	ID        string  `json:"id"`
+	ProjectID *string `json:"project_id,omitempty"`
+	Title     string  `json:"title"`
+	UpdatedAt string  `json:"updated_at"`
 }
 
 func (h *ConversationHandler) List(c *gin.Context) {
@@ -47,6 +50,7 @@ func (h *ConversationHandler) List(c *gin.Context) {
 	for _, it := range items {
 		out = append(out, conversationListItem{
 			ID:        it.ID,
+			ProjectID: it.ProjectID,
 			Title:     it.Title,
 			UpdatedAt: it.UpdatedAt.Format(time.RFC3339),
 		})
@@ -54,12 +58,22 @@ func (h *ConversationHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"conversations": out})
 }
 
+type toolEventItem struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ArgsJSON string `json:"args_json,omitempty"`
+	OK       bool   `json:"ok"`
+	Content  string `json:"content,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
 type messageItem struct {
-	Seq              int    `json:"seq"`
-	Role             string `json:"role"`
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content,omitempty"`
-	CreatedAt        string `json:"created_at"`
+	Seq              int             `json:"seq"`
+	Role             string          `json:"role"`
+	Content          string          `json:"content"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	Tools            []toolEventItem `json:"tools,omitempty"`
+	CreatedAt        string          `json:"created_at"`
 }
 
 func (h *ConversationHandler) Messages(c *gin.Context) {
@@ -86,11 +100,29 @@ func (h *ConversationHandler) Delete(c *gin.Context) {
 }
 
 func fromModelMessage(m model.Message) messageItem {
-	return messageItem{
+	item := messageItem{
 		Seq:              m.Seq,
 		Role:             m.Role,
 		Content:          m.Content,
 		ReasoningContent: m.ReasoningContent,
 		CreatedAt:        m.CreatedAt.Format(time.RFC3339),
 	}
+	if m.Extra != "" {
+		var payload struct {
+			Tools []stream.ToolEventRecord `json:"tools"`
+		}
+		if err := json.Unmarshal([]byte(m.Extra), &payload); err == nil {
+			for _, t := range payload.Tools {
+				item.Tools = append(item.Tools, toolEventItem{
+					ID:       t.ID,
+					Name:     t.Name,
+					ArgsJSON: t.ArgsJSON,
+					OK:       t.OK,
+					Content:  t.Content,
+					Error:    t.Error,
+				})
+			}
+		}
+	}
+	return item
 }

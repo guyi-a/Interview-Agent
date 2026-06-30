@@ -3,7 +3,13 @@ import { useConversationStore } from "@/stores/conversations";
 import { cn, formatRelative } from "@/lib/utils";
 import type { ConversationItem as ConvItem } from "@/lib/api";
 
-export function ConversationItem({ item }: { item: ConvItem }) {
+export function ConversationItem({
+  item,
+  indent = false,
+}: {
+  item: ConvItem;
+  indent?: boolean;
+}) {
   const remove = useConversationStore((s) => s.remove);
   const navigate = useNavigate();
   const { id: activeId } = useParams();
@@ -23,21 +29,29 @@ export function ConversationItem({ item }: { item: ConvItem }) {
         to={`/c/${item.id}`}
         className={({ isActive }) =>
           cn(
-            "group block px-3 py-2 border-l-2 transition-colors",
+            "group block py-1.5 border-l-2 transition-colors",
+            indent ? "pl-7 pr-3" : "px-3",
             isActive
               ? "border-accent bg-paper"
               : "border-transparent hover:bg-paper",
           )
         }
       >
-        <div className="flex items-start gap-2">
+        <div className="flex items-center gap-2">
           <div className="flex-1 min-w-0">
-            <div className="text-sm truncate text-ink">
+            <div
+              className={cn(
+                "truncate text-ink",
+                indent ? "text-[13px]" : "text-sm",
+              )}
+            >
               {item.title || "（未命名）"}
             </div>
-            <div className="font-mono text-[10px] tracking-wider uppercase text-muted mt-0.5">
-              {formatRelative(item.updated_at)}
-            </div>
+            {!indent && (
+              <div className="font-mono text-[10px] tracking-wider uppercase text-muted mt-0.5">
+                {formatRelative(item.updated_at)}
+              </div>
+            )}
           </div>
           <button
             type="button"

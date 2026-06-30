@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 
 const (
 	dbPath          = "interview.db"
+	workspaceRoot   = ".workspace"
 	addr            = ":9001"
 	shutdownTimeout = 5 * time.Second
 )
@@ -61,13 +63,26 @@ func main() {
 	}
 	convRepo := repository.NewConversationRepo(db)
 	msgRepo := repository.NewMessageRepo(db)
+	projectRepo := repository.NewProjectRepo(db)
+
+	absWorkspaceRoot, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		log.Fatalf("resolve workspace root: %v", err)
+	}
+	if err := os.MkdirAll(absWorkspaceRoot, 0o755); err != nil {
+		log.Fatalf("mkdir workspace root: %v", err)
+	}
 
 	cm, err := llm.NewChatModel(ctx, cfg.LLM)
 	if err != nil {
 		log.Fatalf("llm.NewChatModel: %v", err)
 	}
 
-	ts, err := tools.Builtin(ctx)
+	ts, err := tools.Builtin(ctx, tools.Deps{
+		WorkspaceRoot:    absWorkspaceRoot,
+		ProjectRepo:      projectRepo,
+		ConversationRepo: convRepo,
+	})
 	if err != nil {
 		log.Fatalf("tools.Builtin: %v", err)
 	}
@@ -80,14 +95,17 @@ func main() {
 	manager := stream.NewManager()
 	chatService := service.NewChatService(ag, manager, convRepo, msgRepo)
 	convService := service.NewConversationService(convRepo, msgRepo, manager)
+	projectService := service.NewProjectService(projectRepo)
 
 	chatHandler := handler.NewChatHandler(chatService)
 	convHandler := handler.NewConversationHandler(convService)
+	projectHandler := handler.NewProjectHandler(projectService)
 
 	r := gin.Default()
 	r.Use(corsMiddleware())
 	chatHandler.Register(r)
 	convHandler.Register(r)
+	projectHandler.Register(r)
 
 	srv := &http.Server{Addr: addr, Handler: r}
 
