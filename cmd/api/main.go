@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/guyi-a/Interview-Agent/internal/agent"
+	"github.com/guyi-a/Interview-Agent/internal/agent/browserbridge"
 	"github.com/guyi-a/Interview-Agent/internal/agent/browseruse"
 	"github.com/guyi-a/Interview-Agent/internal/agent/llm"
 	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
@@ -85,6 +86,8 @@ func main() {
 	})
 	defer browserMgr.Shutdown()
 
+	bridgeSvc := browserbridge.NewService(browserbridge.NewRegistry())
+
 	skillLoader, err := skills.NewLoader()
 	if err != nil {
 		log.Fatalf("skills.NewLoader: %v", err)
@@ -95,6 +98,7 @@ func main() {
 		ProjectRepo:      projectRepo,
 		ConversationRepo: convRepo,
 		BrowserUseMgr:    browserMgr,
+		BridgeService:    bridgeSvc,
 		SkillLoader:      skillLoader,
 	})
 	if err != nil {
@@ -120,6 +124,7 @@ func main() {
 	chatHandler.Register(r)
 	convHandler.Register(r)
 	projectHandler.Register(r)
+	browserbridge.Register(r, bridgeSvc)
 
 	srv := &http.Server{Addr: addr, Handler: r}
 

@@ -7,6 +7,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 
+	"github.com/guyi-a/Interview-Agent/internal/agent/browserbridge"
 	"github.com/guyi-a/Interview-Agent/internal/agent/browseruse"
 	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
@@ -19,6 +20,7 @@ type Deps struct {
 	ProjectRepo      *repository.ProjectRepo
 	ConversationRepo *repository.ConversationRepo
 	BrowserUseMgr    *browseruse.Manager
+	BridgeService    *browserbridge.Service
 	SkillLoader      *skills.Loader
 }
 
@@ -68,6 +70,14 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 			return nil, err
 		}
 		out = append(out, installTool, bu)
+	}
+
+	if d.BridgeService != nil {
+		bb, err := newBrowserBridgeTool(d.BridgeService)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, bb)
 	}
 
 	if d.SkillLoader != nil {

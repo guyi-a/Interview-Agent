@@ -1,6 +1,6 @@
 ---
 name: browser-use
-description: 用真实浏览器完成任务（打开网页、搜索、登录、抓页面内容、填表、截图、验证网页交互）。触发场景：用户说"打开网站"/"帮我搜"/"看下这个网页"/"在 X 网站做 Y"/"帮我登录"等。适用工具：browser_use / browser_use_install。不适用：纯 API 调用、静态 URL 解析、下载文件（浏览器没有透明落盘）。
+description: 浏览器任务的**兜底路径**——起一个独立的 Chromium 完成任务。**只在** browser-bridge 的 extension_status.ready=false（用户没装扩展或扩展没连上）时用这条。触发条件：先 load browser-bridge → extension_status → ready=false 才 load 这个 skill。也用于需要截图落盘 / 独立环境的场景。适用工具：browser_use / browser_use_install。不适用：ready=true 时（应该走 browser-bridge）。
 ---
 
 # Skill: browser-use（浏览器自动化）
