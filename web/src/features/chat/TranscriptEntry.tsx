@@ -1,6 +1,75 @@
 import { useState } from "react";
 import { formatClock, cn } from "@/lib/utils";
 import type { ChatTurn, SubAgentEvent, ToolCall } from "@/hooks/useChatStream";
+import { MessageBody } from "./MessageBody";
+
+function CopyIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="4" y="4" width="9" height="9" rx="1.5" />
+      <path d="M3 10V3.5A1.5 1.5 0 0 1 4.5 2H10" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 8.5l3 3 7-7" />
+    </svg>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard may be unavailable in some contexts; silently ignore */
+        }
+      }}
+      className={cn(
+        "ml-auto inline-flex items-center gap-1.5 px-2 py-1 rounded",
+        "text-muted hover:text-ink hover:bg-subtle",
+        "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+        "transition-opacity",
+        copied && "opacity-100 text-ink",
+      )}
+      aria-label={copied ? "已复制" : "复制消息"}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
+      <span className="tracking-normal normal-case">
+        {copied ? "已复制" : "复制"}
+      </span>
+    </button>
+  );
+}
 
 const ROLE_LABEL: Record<ChatTurn["role"], string> = {
   user: "CANDIDATE",
@@ -17,7 +86,12 @@ export function TranscriptEntry({
   streaming: boolean;
 }) {
   return (
-    <article className={showRule ? "border-t border-rule pt-8 mt-8" : ""}>
+    <article
+      className={cn(
+        "group",
+        showRule && "border-t border-rule pt-8 mt-8",
+      )}
+    >
       <header className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-3 flex items-center gap-3">
         <span>{ROLE_LABEL[turn.role]}</span>
         <span aria-hidden="true">·</span>
@@ -26,6 +100,9 @@ export function TranscriptEntry({
           <span className="text-accent normal-case tracking-normal lowercase">
             ● streaming
           </span>
+        )}
+        {turn.role === "assistant" && turn.content && !streaming && (
+          <CopyButton text={turn.content} />
         )}
       </header>
 
@@ -47,10 +124,11 @@ export function TranscriptEntry({
         <SubAgentTimeline events={turn.subEvents} />
       )}
 
-      <div className="text-[15px] leading-7 whitespace-pre-wrap text-ink">
-        {turn.content}
-        {streaming && !turn.content && (
-          <span className="text-muted">…</span>
+      <div className="text-ink">
+        {turn.content ? (
+          <MessageBody content={turn.content} streaming={streaming} />
+        ) : (
+          streaming && <span className="text-muted">…</span>
         )}
       </div>
 
@@ -153,16 +231,21 @@ function SubAgentTimeline({ events }: { events: SubAgentEvent[] }) {
               <div className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-1">
                 ↳ {it.agent} · {it.type}
               </div>
-              <div
-                className={cn(
-                  "text-[13px] leading-relaxed whitespace-pre-wrap",
-                  it.type === "thinking" && "text-muted italic",
-                  it.type === "text" && "text-ink/80",
-                  it.type === "error" && "text-red-700",
-                )}
-              >
-                {it.content}
-              </div>
+              {it.type === "text" ? (
+                <div className="text-ink/80">
+                  <MessageBody content={it.content} dense />
+                </div>
+              ) : (
+                <div
+                  className={cn(
+                    "text-[13px] leading-relaxed whitespace-pre-wrap",
+                    it.type === "thinking" && "text-muted italic",
+                    it.type === "error" && "text-red-700",
+                  )}
+                >
+                  {it.content}
+                </div>
+              )}
             </div>
           );
         }
@@ -242,9 +325,7 @@ function ToolEntry({ tool }: { tool: ToolCall }) {
               <div className="text-[9px] tracking-[0.2em] uppercase text-muted mb-1">
                 Result
               </div>
-              <pre className="text-[11px] text-ink whitespace-pre-wrap break-all">
-                {truncate(tool.content, 1200)}
-              </pre>
+              <MessageBody content={truncate(tool.content, 1200)} dense />
             </div>
           )}
           {tool.error && (
