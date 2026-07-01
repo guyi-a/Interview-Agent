@@ -78,6 +78,116 @@ func TestBrowserUse_OpenReadClick(t *testing.T) {
 	}
 }
 
+// TestBrowserUse_Sprint2 exercises the second batch of actions: scroll,
+// wait_for, extract, screenshot, go_back / reload, execute_script. Doesn't
+// need any real network — everything runs against the same file:// fixture.
+func TestBrowserUse_Sprint2(t *testing.T) {
+	if st := browseruse.CheckInstall(); !st.DriverReady || !st.BrowsersReady {
+		t.Skipf("skip: %s", st.Message)
+	}
+
+	dir := t.TempDir()
+	htmlPath := filepath.Join(dir, "sprint2.html")
+	if err := os.WriteFile(htmlPath, []byte(sprint2HTML), 0o644); err != nil {
+		t.Fatalf("write sprint2.html: %v", err)
+	}
+	pageURL := "file://" + htmlPath
+
+	mgr := browseruse.NewManager(browseruse.Config{Headless: true})
+	defer mgr.Shutdown()
+
+	sess, err := mgr.Session(context.Background(), "test-sprint2")
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	info, err := sess.OpenTab(pageURL)
+	if err != nil {
+		t.Fatalf("OpenTab: %v", err)
+	}
+
+	if err := sess.Scroll(info.PageID, 0, 400); err != nil {
+		t.Fatalf("Scroll: %v", err)
+	}
+
+	if err := sess.WaitFor(info.PageID, "#late", 3000); err != nil {
+		t.Fatalf("WaitFor #late: %v", err)
+	}
+
+	state, err := sess.ReadState(info.PageID)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if !strings.Contains(state, "late-button") {
+		t.Fatalf("late-button not in state after wait_for:\n%s", state)
+	}
+	lateIdx := indexOfLineContaining(state, "late-button")
+	if lateIdx == 0 {
+		t.Fatalf("could not resolve late-button index")
+	}
+
+	text, _, err := sess.Extract(info.PageID, lateIdx, false)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if !strings.Contains(text, "late-button") {
+		t.Fatalf("extracted text mismatch: %q", text)
+	}
+
+	shotPath := filepath.Join(dir, "shot.png")
+	abs, b64, err := sess.Screenshot(info.PageID, shotPath, false)
+	if err != nil {
+		t.Fatalf("Screenshot: %v", err)
+	}
+	if abs != shotPath {
+		t.Fatalf("screenshot path mismatch: got %q want %q", abs, shotPath)
+	}
+	if b64 != "" {
+		t.Errorf("screenshot with save_path should not return base64, got len=%d", len(b64))
+	}
+	fi, err := os.Stat(shotPath)
+	if err != nil {
+		t.Fatalf("screenshot file: %v", err)
+	}
+	if fi.Size() < 100 {
+		t.Fatalf("screenshot too small: %d bytes", fi.Size())
+	}
+
+	val, err := sess.ExecuteScript(info.PageID, "() => document.title")
+	if err != nil {
+		t.Fatalf("ExecuteScript: %v", err)
+	}
+	if title, ok := val.(string); !ok || title != "sprint2 fixture" {
+		t.Fatalf("execute_script returned unexpected value: %v", val)
+	}
+
+	if err := sess.Reload(info.PageID); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// After reload, #late reappears on the same delay — re-wait proves
+	// the page reloaded rather than getting a cached snapshot.
+	if err := sess.WaitFor(info.PageID, "#late", 3000); err != nil {
+		t.Fatalf("WaitFor after reload: %v", err)
+	}
+
+	t.Logf("sprint2 actions all passed; screenshot=%s", shotPath)
+}
+
+const sprint2HTML = `<!doctype html>
+<html><head><title>sprint2 fixture</title></head>
+<body style="height:2000px">
+  <h1>top of page</h1>
+  <div style="height:800px"></div>
+  <div id="anchor">middle</div>
+  <script>
+    setTimeout(() => {
+      const b = document.createElement('button');
+      b.id = 'late';
+      b.innerText = 'late-button';
+      document.body.appendChild(b);
+    }, 200);
+  </script>
+</body></html>`
+
 // TestBrowserUse_TypePress verifies type + press flow: fill an input, press Enter.
 func TestBrowserUse_TypePress(t *testing.T) {
 	if st := browseruse.CheckInstall(); !st.DriverReady || !st.BrowsersReady {

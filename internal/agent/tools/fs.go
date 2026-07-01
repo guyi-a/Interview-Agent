@@ -11,7 +11,6 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 
-	"github.com/guyi-a/Interview-Agent/internal/agent/contextkey"
 	"github.com/guyi-a/Interview-Agent/internal/agent/scope"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 )
@@ -31,25 +30,7 @@ type fsDeps struct {
 // conversation, or a user-readable error if no workspace is mounted yet
 // (so the agent knows to call create_workspace first).
 func (d *fsDeps) resolveWorkspace(ctx context.Context) (string, error) {
-	convID := contextkey.ConversationID(ctx)
-	if convID == "" {
-		return "", fmt.Errorf("internal error: no conversation in context")
-	}
-	conv, err := d.convRepo.Get(ctx, convID)
-	if err != nil {
-		return "", fmt.Errorf("load conversation: %w", err)
-	}
-	if conv == nil || conv.ProjectID == nil || *conv.ProjectID == "" {
-		return "", fmt.Errorf("no workspace mounted for this conversation. Call create_workspace first")
-	}
-	project, err := d.projectRepo.Get(ctx, *conv.ProjectID)
-	if err != nil {
-		return "", fmt.Errorf("load project: %w", err)
-	}
-	if project == nil {
-		return "", fmt.Errorf("project %q referenced by conversation no longer exists", *conv.ProjectID)
-	}
-	return project.Workspace, nil
+	return resolveConversationWorkspace(ctx, d.convRepo, d.projectRepo)
 }
 
 // --- list_files ---

@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/browseruse"
 	"github.com/guyi-a/Interview-Agent/internal/agent/contextkey"
+	"github.com/guyi-a/Interview-Agent/internal/agent/scope"
+	"github.com/guyi-a/Interview-Agent/internal/repository"
 )
 
 // browser_use tool: one mega-tool with an `action` verb. Kept a single tool
@@ -25,40 +30,65 @@ import (
 //   press(page_id, key, index?) → 键盘事件；不传 index 时作用于整页
 
 type browserUseInput struct {
-	Action string `json:"action" jsonschema:"description=One of: open_tab / list_pages / close_tab / read_state / click / type / press / close_session"`
-	PageID string `json:"page_id,omitempty" jsonschema:"description=Page identifier returned by open_tab. Required for close_tab / read_state / click / type / press."`
-	URL    string `json:"url,omitempty" jsonschema:"description=Absolute URL for open_tab, must include scheme (http/https/file)."`
-	Index  int    `json:"index,omitempty" jsonschema:"description=Element index from the last read_state on this page. Required for click / type. Optional for press."`
-	Text   string `json:"text,omitempty" jsonschema:"description=For type: what to fill into the element."`
-	Key    string `json:"key,omitempty" jsonschema:"description=For press: key name like 'Enter', 'Tab', 'Escape', or a combo like 'Control+A'."`
+	Action      string `json:"action" jsonschema:"description=One of: open_tab / list_pages / close_tab / focus_page / read_state / click / hover / dblclick / rightclick / type / press / scroll / wait_for / go_back / reload / extract / screenshot / execute_script / close_session"`
+	PageID      string `json:"page_id,omitempty" jsonschema:"description=Page identifier returned by open_tab. Required for most actions."`
+	URL         string `json:"url,omitempty" jsonschema:"description=Absolute URL for open_tab, must include scheme (http/https/file)."`
+	Index       int    `json:"index,omitempty" jsonschema:"description=Element index from the last read_state. Required for click / hover / dblclick / rightclick / type / extract."`
+	Text        string `json:"text,omitempty" jsonschema:"description=For type: what to fill into the element."`
+	Key         string `json:"key,omitempty" jsonschema:"description=For press: 'Enter' / 'Tab' / 'Escape' / 'Control+A' etc."`
+	DX          int    `json:"dx,omitempty" jsonschema:"description=For scroll: horizontal pixels to scroll by (positive=right)."`
+	DY          int    `json:"dy,omitempty" jsonschema:"description=For scroll: vertical pixels to scroll by (positive=down)."`
+	Selector    string `json:"selector,omitempty" jsonschema:"description=For wait_for: CSS selector to wait for. Mutually exclusive with a bare timeout wait."`
+	TimeoutMS   int    `json:"timeout_ms,omitempty" jsonschema:"description=For wait_for: ceiling in milliseconds. Alone (no selector) means a plain idle wait."`
+	SavePath    string `json:"save_path,omitempty" jsonschema:"description=For screenshot: destination path. Empty returns base64 (only for small images)."`
+	FullPage    bool   `json:"full_page,omitempty" jsonschema:"description=For screenshot: capture the full scrolling page instead of just the viewport."`
+	IncludeHTML bool   `json:"include_html,omitempty" jsonschema:"description=For extract: also return the element's innerHTML."`
+	Script      string `json:"script,omitempty" jsonschema:"description=For execute_script: JS expression or async function body that returns a JSON-serialisable value."`
 }
 
 type browserUseOutput struct {
-	OK      bool             `json:"ok"`
-	Message string           `json:"message,omitempty"`
-	Page    *browseruse.PageInfo `json:"page,omitempty"`
-	Pages   []browseruse.PageInfo `json:"pages,omitempty"`
-	State   string           `json:"state,omitempty"`
+	OK          bool                  `json:"ok"`
+	Message     string                `json:"message,omitempty"`
+	Page        *browseruse.PageInfo  `json:"page,omitempty"`
+	Pages       []browseruse.PageInfo `json:"pages,omitempty"`
+	State       string                `json:"state,omitempty"`
+	Text        string                `json:"text,omitempty"`
+	HTML        string                `json:"html,omitempty"`
+	Path        string                `json:"path,omitempty"`
+	ImageBase64 string                `json:"image_base64,omitempty"`
+	Value       interface{}           `json:"value,omitempty"`
 }
 
-func newBrowserUseTool(mgr *browseruse.Manager) (tool.BaseTool, error) {
+func newBrowserUseTool(
+	mgr *browseruse.Manager,
+	convRepo *repository.ConversationRepo,
+	projectRepo *repository.ProjectRepo,
+) (tool.BaseTool, error) {
 	if mgr == nil {
 		return nil, errors.New("browser_use: manager is nil")
 	}
 	desc := "Real browser automation via an independent Chromium instance. " +
-		"First call must be open_tab to load a URL; use read_state to see the " +
-		"interactive elements (indexed), then click / type / press by index. " +
-		"Read_state must be called again after any action that changes the DOM " +
-		"— element indices are only valid for the most recent read_state on that page. " +
-		"When the task is done, call action='close_session' to release the browser. " +
-		"If the tool complains that chromium isn't installed, first call " +
-		"browser_use_install(step='check')."
+		"Typical flow: open_tab → read_state → click/type/press by index → " +
+		"read_state again → ... → close_session when done. " +
+		"Element indices from read_state expire the moment the DOM changes, " +
+		"so re-read after every action. " +
+		"Additional actions: hover / dblclick / rightclick (click variants), " +
+		"scroll (dx/dy), wait_for (selector or timeout_ms), go_back / reload, " +
+		"focus_page, extract (element text +optional innerHTML), screenshot " +
+		"(save_path + full_page), execute_script (raw JS). " +
+		"If chromium isn't installed, first call browser_use_install(step='check')."
 	return utils.InferTool("browser_use", desc, func(ctx context.Context, in *browserUseInput) (*browserUseOutput, error) {
-		return dispatchBrowserUse(ctx, mgr, in)
+		return dispatchBrowserUse(ctx, mgr, convRepo, projectRepo, in)
 	})
 }
 
-func dispatchBrowserUse(ctx context.Context, mgr *browseruse.Manager, in *browserUseInput) (*browserUseOutput, error) {
+func dispatchBrowserUse(
+	ctx context.Context,
+	mgr *browseruse.Manager,
+	convRepo *repository.ConversationRepo,
+	projectRepo *repository.ProjectRepo,
+	in *browserUseInput,
+) (*browserUseOutput, error) {
 	convID := contextkey.ConversationID(ctx)
 	if convID == "" {
 		return nil, errors.New("browser_use: no conversation in context")
@@ -142,9 +172,141 @@ func dispatchBrowserUse(ctx context.Context, mgr *browseruse.Manager, in *browse
 		}
 		return &browserUseOutput{OK: true, Message: "pressed " + in.Key}, nil
 
+	case "hover", "dblclick", "rightclick":
+		if in.PageID == "" || in.Index == 0 {
+			return &browserUseOutput{OK: false, Message: in.Action + " 需要 page_id 和 index"}, nil
+		}
+		var err error
+		switch in.Action {
+		case "hover":
+			err = sess.Hover(in.PageID, in.Index)
+		case "dblclick":
+			err = sess.Dblclick(in.PageID, in.Index)
+		case "rightclick":
+			err = sess.Rightclick(in.PageID, in.Index)
+		}
+		if err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Message: fmt.Sprintf("%s on index %d", in.Action, in.Index)}, nil
+
+	case "scroll":
+		if in.PageID == "" {
+			return &browserUseOutput{OK: false, Message: "scroll 需要 page_id"}, nil
+		}
+		if err := sess.Scroll(in.PageID, in.DX, in.DY); err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Message: fmt.Sprintf("scrolled by (%d,%d)", in.DX, in.DY)}, nil
+
+	case "wait_for":
+		if in.PageID == "" {
+			return &browserUseOutput{OK: false, Message: "wait_for 需要 page_id"}, nil
+		}
+		if err := sess.WaitFor(in.PageID, in.Selector, in.TimeoutMS); err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Message: "wait done"}, nil
+
+	case "go_back":
+		if in.PageID == "" {
+			return &browserUseOutput{OK: false, Message: "go_back 需要 page_id"}, nil
+		}
+		if err := sess.GoBack(in.PageID); err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Message: "navigated back"}, nil
+
+	case "reload":
+		if in.PageID == "" {
+			return &browserUseOutput{OK: false, Message: "reload 需要 page_id"}, nil
+		}
+		if err := sess.Reload(in.PageID); err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Message: "reloaded"}, nil
+
+	case "focus_page":
+		if in.PageID == "" {
+			return &browserUseOutput{OK: false, Message: "focus_page 需要 page_id"}, nil
+		}
+		if err := sess.FocusPage(in.PageID); err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Message: "focused"}, nil
+
+	case "extract":
+		if in.PageID == "" || in.Index == 0 {
+			return &browserUseOutput{OK: false, Message: "extract 需要 page_id 和 index"}, nil
+		}
+		text, html, err := sess.Extract(in.PageID, in.Index, in.IncludeHTML)
+		if err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Text: text, HTML: html}, nil
+
+	case "screenshot":
+		if in.PageID == "" {
+			return &browserUseOutput{OK: false, Message: "screenshot 需要 page_id"}, nil
+		}
+		absPath, err := resolveScreenshotPath(ctx, convRepo, projectRepo, in.SavePath)
+		if err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		path, _, err := sess.Screenshot(in.PageID, absPath, in.FullPage)
+		if err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Path: path}, nil
+
+	case "execute_script":
+		if in.PageID == "" || in.Script == "" {
+			return &browserUseOutput{OK: false, Message: "execute_script 需要 page_id 和 script"}, nil
+		}
+		val, err := sess.ExecuteScript(in.PageID, in.Script)
+		if err != nil {
+			return &browserUseOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserUseOutput{OK: true, Value: val}, nil
+
 	default:
 		return &browserUseOutput{OK: false, Message: "unknown action: " + in.Action}, nil
 	}
+}
+
+// resolveScreenshotPath enforces workspace scope for browser screenshots:
+//   - no workspace → return a self-heal hint asking for create_workspace
+//   - save_path empty → auto-name under screenshots/<timestamp>.png
+//   - save_path absolute → reject
+//   - save_path relative → resolve inside workspace, prevent escape via ..
+func resolveScreenshotPath(
+	ctx context.Context,
+	convRepo *repository.ConversationRepo,
+	projectRepo *repository.ProjectRepo,
+	savePath string,
+) (string, error) {
+	ws, err := resolveConversationWorkspace(ctx, convRepo, projectRepo)
+	if err != nil {
+		return "", fmt.Errorf("screenshot 需要工作区：%w。请先调 create_workspace 建一个", err)
+	}
+
+	if savePath == "" {
+		name := fmt.Sprintf("screenshots/shot-%s.png", time.Now().Format("20060102-150405"))
+		return filepath.Join(ws, name), nil
+	}
+	if filepath.IsAbs(savePath) {
+		return "", fmt.Errorf("save_path 不接受绝对路径 %q；传相对路径，会落到 workspace 下", savePath)
+	}
+	// Anti-escape: use scope package so ".." can't punch out of ws.
+	abs, err := scope.Resolve(ws, savePath)
+	if err != nil {
+		return "", fmt.Errorf("save_path 越界：%w", err)
+	}
+	// Default extension to .png if the model omits it.
+	if !strings.Contains(filepath.Base(abs), ".") {
+		abs += ".png"
+	}
+	return abs, nil
 }
 
 // --- browser_use_install ---

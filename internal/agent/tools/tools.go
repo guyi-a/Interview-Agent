@@ -63,7 +63,7 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 		if err != nil {
 			return nil, err
 		}
-		bu, err := newBrowserUseTool(d.BrowserUseMgr)
+		bu, err := newBrowserUseTool(d.BrowserUseMgr, d.ConversationRepo, d.ProjectRepo)
 		if err != nil {
 			return nil, err
 		}
