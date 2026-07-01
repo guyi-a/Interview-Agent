@@ -15,7 +15,6 @@ import (
 
 	"github.com/guyi-a/Interview-Agent/internal/agent"
 	"github.com/guyi-a/Interview-Agent/internal/agent/llm"
-	"github.com/guyi-a/Interview-Agent/internal/agent/prompts"
 	"github.com/guyi-a/Interview-Agent/internal/agent/tools"
 	"github.com/guyi-a/Interview-Agent/internal/config"
 	"github.com/guyi-a/Interview-Agent/internal/handler"
@@ -87,13 +86,13 @@ func main() {
 		log.Fatalf("tools.Builtin: %v", err)
 	}
 
-	ag, err := agent.NewReActAgent(ctx, cm, ts, prompts.General)
+	ag, err := agent.NewInterviewADKAgent(ctx, cm, ts)
 	if err != nil {
-		log.Fatalf("agent.NewReActAgent: %v", err)
+		log.Fatalf("agent.NewInterviewADKAgent: %v", err)
 	}
 
 	manager := stream.NewManager()
-	chatService := service.NewChatService(ag, manager, convRepo, msgRepo, projectRepo)
+	chatService := service.NewChatService(ag.Runner, ag.RootName, manager, convRepo, msgRepo, projectRepo)
 	convService := service.NewConversationService(convRepo, msgRepo, manager)
 	projectService := service.NewProjectService(projectRepo, convRepo, manager, absWorkspaceRoot)
 

@@ -52,12 +52,15 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 
 func (h *ChatHandler) Resume(c *gin.Context) {
 	id := c.Param("id")
-	buf := h.chat.Get(id)
-	if buf == nil {
+	// Only resume in-flight streams. Completed buffers stay in the manager
+	// so the original POST client can drain its `done`/`error` frame, but a
+	// reload client should read history from the DB instead — replaying a
+	// completed buffer would duplicate the persisted assistant message.
+	if !h.chat.IsStreaming(id) {
 		c.Status(http.StatusNoContent)
 		return
 	}
-	writeSSE(c, buf)
+	writeSSE(c, h.chat.Get(id))
 }
 
 func (h *ChatHandler) Cancel(c *gin.Context) {

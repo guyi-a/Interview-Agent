@@ -67,13 +67,27 @@ type toolEventItem struct {
 	Error    string `json:"error,omitempty"`
 }
 
+type subAgentEventItem struct {
+	Seq              int    `json:"seq"`
+	Agent            string `json:"agent"`
+	ParentToolCallID string `json:"parent_tool_call_id,omitempty"`
+	Type             string `json:"type"`
+	Content          string `json:"content,omitempty"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
+	Name             string `json:"name,omitempty"`
+	ArgsJSON         string `json:"args_json,omitempty"`
+	OK               *bool  `json:"ok,omitempty"`
+	Error            string `json:"error,omitempty"`
+}
+
 type messageItem struct {
-	Seq              int             `json:"seq"`
-	Role             string          `json:"role"`
-	Content          string          `json:"content"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
-	Tools            []toolEventItem `json:"tools,omitempty"`
-	CreatedAt        string          `json:"created_at"`
+	Seq              int                 `json:"seq"`
+	Role             string              `json:"role"`
+	Content          string              `json:"content"`
+	ReasoningContent string              `json:"reasoning_content,omitempty"`
+	Tools            []toolEventItem     `json:"tools,omitempty"`
+	SubEvents        []subAgentEventItem `json:"sub_events,omitempty"`
+	CreatedAt        string              `json:"created_at"`
 }
 
 func (h *ConversationHandler) Messages(c *gin.Context) {
@@ -109,7 +123,8 @@ func fromModelMessage(m model.Message) messageItem {
 	}
 	if m.Extra != "" {
 		var payload struct {
-			Tools []stream.ToolEventRecord `json:"tools"`
+			Tools     []stream.ToolEventRecord `json:"tools"`
+			SubEvents []stream.SubAgentEvent   `json:"sub_events"`
 		}
 		if err := json.Unmarshal([]byte(m.Extra), &payload); err == nil {
 			for _, t := range payload.Tools {
@@ -120,6 +135,20 @@ func fromModelMessage(m model.Message) messageItem {
 					OK:       t.OK,
 					Content:  t.Content,
 					Error:    t.Error,
+				})
+			}
+			for _, e := range payload.SubEvents {
+				item.SubEvents = append(item.SubEvents, subAgentEventItem{
+					Seq:              e.Seq,
+					Agent:            e.Agent,
+					ParentToolCallID: e.ParentToolCallID,
+					Type:             e.Type,
+					Content:          e.Content,
+					ToolCallID:       e.ToolCallID,
+					Name:             e.Name,
+					ArgsJSON:         e.ArgsJSON,
+					OK:               e.OK,
+					Error:            e.Error,
 				})
 			}
 		}

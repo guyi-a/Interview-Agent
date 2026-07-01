@@ -23,12 +23,30 @@ export type PersistedToolEvent = {
   error?: string;
 };
 
+// One event captured from a sub-agent (e.g. deep_research) during a single
+// assistant turn. Persisted as an ordered array so the UI can replay the
+// nested timeline after the page reloads. parent_tool_call_id links each
+// event back to the root tool_call that triggered the sub-agent.
+export type PersistedSubAgentEvent = {
+  seq: number;
+  agent: string;
+  parent_tool_call_id?: string;
+  type: "thinking" | "text" | "tool_call" | "tool_result" | "error";
+  content?: string;
+  tool_call_id?: string;
+  name?: string;
+  args_json?: string;
+  ok?: boolean;
+  error?: string;
+};
+
 export type PersistedMessage = {
   seq: number;
   role: "user" | "assistant" | "tool" | "system";
   content: string;
   reasoning_content?: string;
   tools?: PersistedToolEvent[];
+  sub_events?: PersistedSubAgentEvent[];
   created_at: string;
 };
 
@@ -112,6 +130,19 @@ export async function postChat(
     body: JSON.stringify({ message }),
     signal,
   });
+}
+
+export async function resumeChat(
+  id: string,
+  signal: AbortSignal,
+): Promise<Response | null> {
+  const res = await fetch(`${API_BASE}/chat/${encodeURIComponent(id)}`, {
+    method: "GET",
+    signal,
+  });
+  if (res.status === 204) return null;
+  if (!res.ok) throw new Error(`resumeChat: ${res.status}`);
+  return res;
 }
 
 export async function cancelChat(id: string): Promise<void> {

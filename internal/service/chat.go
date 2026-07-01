@@ -3,24 +3,22 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"log"
 	"strings"
 
-	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent"
-	"github.com/cloudwego/eino/flow/agent/react"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/contextkey"
+	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/repository/model"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
 )
 
 type ChatService struct {
-	agent       *react.Agent
+	runner      *adk.Runner
+	rootName    string
 	manager     *stream.Manager
 	convRepo    *repository.ConversationRepo
 	msgRepo     *repository.MessageRepo
@@ -28,14 +26,16 @@ type ChatService struct {
 }
 
 func NewChatService(
-	ag *react.Agent,
+	runner *adk.Runner,
+	rootName string,
 	manager *stream.Manager,
 	convRepo *repository.ConversationRepo,
 	msgRepo *repository.MessageRepo,
 	projectRepo *repository.ProjectRepo,
 ) *ChatService {
 	return &ChatService{
-		agent:       ag,
+		runner:      runner,
+		rootName:    rootName,
 		manager:     manager,
 		convRepo:    convRepo,
 		msgRepo:     msgRepo,
@@ -64,7 +64,7 @@ func (s *ChatService) Cancel(id string) bool {
 //   - if projectID is provided AND the conversation is new (or unbound), binds it
 //   - loads prior messages as context
 //   - persists the new user message
-//   - kicks off the Agent in a goroutine, persists assistant reply when done
+//   - kicks off the ADK Runner in a goroutine, persists assistant reply when done
 func (s *ChatService) Start(ctx context.Context, id, userMsg, projectID string) (*stream.StreamBuffer, error) {
 	if err := s.convRepo.Upsert(ctx, id); err != nil {
 		return nil, err
@@ -134,52 +134,48 @@ func (s *ChatService) workspaceContext(ctx context.Context, convID string) strin
 func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schema.Message, buf *stream.StreamBuffer) {
 	ctx = contextkey.WithConversationID(ctx, convID)
 	ctx = contextkey.WithBuffer(ctx, buf)
+	// Per-run registry so the tool-error middleware and the SSE handler agree
+	// on which tool calls were rescued from a failure. SSE emits ok=false
+	// for those, ok=true otherwise.
+	ctx = toolerr.WithRegistry(ctx, toolerr.NewRegistry())
 
 	collector := stream.NewRunCollector()
-	cb := stream.NewSSEHandler(buf, collector)
-	sr, err := s.agent.Stream(ctx, msgs,
-		agent.WithComposeOptions(compose.WithCallbacks(cb)),
-	)
-	if err != nil {
-		log.Printf("agent stream error: %v", err)
+
+	iter := s.runner.Run(ctx, msgs)
+	if err := stream.ConsumeADKEvents(ctx, iter, s.rootName, buf, collector); err != nil {
+		log.Printf("adk runner error: %v", err)
 		stream.FinalizeErr(buf, err)
 		return
 	}
-	defer sr.Close()
 
-	for {
-		_, err := sr.Recv()
-		if errors.Is(err, io.EOF) {
-			collector.Wait()
-			extra := ""
-			if tools := collector.Tools(); len(tools) > 0 {
-				if data, jerr := json.Marshal(map[string]any{"tools": tools}); jerr == nil {
-					extra = string(data)
-				} else {
-					log.Printf("marshal tools: %v", jerr)
-				}
-			}
-			if err := s.msgRepo.Append(context.Background(), &model.Message{
-				ConversationID:   convID,
-				Role:             string(schema.Assistant),
-				Content:          collector.Content(),
-				ReasoningContent: collector.Reasoning(),
-				Extra:            extra,
-			}); err != nil {
-				log.Printf("persist assistant message: %v", err)
-			}
-			_ = s.convRepo.Upsert(context.Background(), convID)
-			stream.FinalizeOK(buf)
-			return
+	extra := ""
+	tools := collector.Tools()
+	subEvents := collector.SubEvents()
+	if len(tools) > 0 || len(subEvents) > 0 {
+		payload := map[string]any{}
+		if len(tools) > 0 {
+			payload["tools"] = tools
 		}
-		if err != nil {
-			log.Printf("agent recv error: %v", err)
-			stream.FinalizeErr(buf, err)
-			return
+		if len(subEvents) > 0 {
+			payload["sub_events"] = subEvents
 		}
-		// chunk discarded: the collector (via callback) is the source of truth
-		// for persistence; we only drain here to keep the eino pipeline moving.
+		if data, jerr := json.Marshal(payload); jerr == nil {
+			extra = string(data)
+		} else {
+			log.Printf("marshal extra: %v", jerr)
+		}
 	}
+	if err := s.msgRepo.Append(context.Background(), &model.Message{
+		ConversationID:   convID,
+		Role:             string(schema.Assistant),
+		Content:          collector.Content(),
+		ReasoningContent: collector.Reasoning(),
+		Extra:            extra,
+	}); err != nil {
+		log.Printf("persist assistant message: %v", err)
+	}
+	_ = s.convRepo.Upsert(context.Background(), convID)
+	stream.FinalizeOK(buf)
 }
 
 func toSchemaMessages(rows []model.Message) []*schema.Message {

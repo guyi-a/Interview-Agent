@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { formatClock, cn } from "@/lib/utils";
-import type { ChatTurn, ToolCall } from "@/hooks/useChatStream";
+import type { ChatTurn, SubAgentEvent, ToolCall } from "@/hooks/useChatStream";
 
 const ROLE_LABEL: Record<ChatTurn["role"], string> = {
   user: "CANDIDATE",
@@ -43,6 +43,10 @@ export function TranscriptEntry({
         </div>
       )}
 
+      {turn.subEvents.length > 0 && (
+        <SubAgentTimeline events={turn.subEvents} />
+      )}
+
       <div className="text-[15px] leading-7 whitespace-pre-wrap text-ink">
         {turn.content}
         {streaming && !turn.content && (
@@ -54,6 +58,132 @@ export function TranscriptEntry({
         <p className="mt-2 text-sm text-red-700">⚠ {turn.error}</p>
       )}
     </article>
+  );
+}
+
+// SubAgentTimeline renders the captured events from sub-agents (e.g.
+// deep_research) for one assistant turn. It walks the events in arrival
+// order, coalesces matching tool_call + tool_result pairs into a single
+// ToolEntry card, and renders thinking / text / error as labeled prose.
+//
+// First-pass UX: everything is flat under one indented column with a faint
+// left rule, and each item carries a `↳ <agent>` chip so the user can tell
+// the supervisor's own events from the sub-agent's. We can switch to a
+// disclosure-style nested layout later by grouping on parentToolCallId.
+function SubAgentTimeline({ events }: { events: SubAgentEvent[] }) {
+  type ProseItem = {
+    kind: "prose";
+    agent: string;
+    type: "thinking" | "text" | "error";
+    content: string;
+  };
+  type ToolItem = {
+    kind: "tool";
+    agent: string;
+    toolCallId: string;
+    name: string;
+    argsJson: string;
+    status: ToolCall["status"];
+    content?: string;
+    error?: string;
+  };
+  type Item = ProseItem | ToolItem;
+
+  const items: Item[] = [];
+  // toolCallId → index into items so a later tool_result can mutate the
+  // matching tool_call entry in place.
+  const toolIdx = new Map<string, number>();
+
+  for (const e of events) {
+    if (e.type === "tool_call") {
+      const id = e.toolCallId ?? "";
+      items.push({
+        kind: "tool",
+        agent: e.agent,
+        toolCallId: id,
+        name: e.name ?? "",
+        argsJson: e.argsJson ?? "",
+        status: "running",
+      });
+      toolIdx.set(id, items.length - 1);
+    } else if (e.type === "tool_result") {
+      const id = e.toolCallId ?? "";
+      const idx = toolIdx.get(id);
+      if (idx !== undefined) {
+        const prev = items[idx] as ToolItem;
+        items[idx] = {
+          ...prev,
+          name: prev.name || e.name || "",
+          status: e.ok === false ? "error" : "ok",
+          content: e.ok === false ? undefined : e.content,
+          error: e.ok === false ? e.error : undefined,
+        };
+      } else {
+        // Result without a matching call (shouldn't happen, but render
+        // defensively rather than dropping the event).
+        items.push({
+          kind: "tool",
+          agent: e.agent,
+          toolCallId: id,
+          name: e.name ?? "",
+          argsJson: "",
+          status: e.ok === false ? "error" : "ok",
+          content: e.ok === false ? undefined : e.content,
+          error: e.ok === false ? e.error : undefined,
+        });
+      }
+    } else {
+      items.push({
+        kind: "prose",
+        agent: e.agent,
+        type: e.type,
+        content: e.content ?? e.error ?? "",
+      });
+    }
+  }
+
+  if (items.length === 0) return null;
+
+  return (
+    <section className="my-4 pl-4 border-l border-ink/15 space-y-3">
+      {items.map((it, i) => {
+        if (it.kind === "prose") {
+          return (
+            <div key={i}>
+              <div className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-1">
+                ↳ {it.agent} · {it.type}
+              </div>
+              <div
+                className={cn(
+                  "text-[13px] leading-relaxed whitespace-pre-wrap",
+                  it.type === "thinking" && "text-muted italic",
+                  it.type === "text" && "text-ink/80",
+                  it.type === "error" && "text-red-700",
+                )}
+              >
+                {it.content}
+              </div>
+            </div>
+          );
+        }
+        const synthetic: ToolCall = {
+          id: it.toolCallId || `sub-${i}`,
+          name: it.name,
+          argsJson: it.argsJson,
+          status: it.status,
+          content: it.content,
+          error: it.error,
+        };
+        return (
+          <div key={i}>
+            <div className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-1">
+              ↳ {it.agent}
+            </div>
+            <ToolEntry tool={synthetic} />
+          </div>
+        );
+      })}
+    </section>
   );
 }
 

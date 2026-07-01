@@ -23,6 +23,18 @@ import (
 type Frame struct {
 	Type string `json:"type"`
 
+	// Agent identifies which ADK agent produced this frame. Empty (or equal
+	// to the run's root agent name) means the supervisor itself. A non-root
+	// value (e.g. "deep_research") tells the UI to render this event as a
+	// nested sub-agent activity.
+	Agent string `json:"agent,omitempty"`
+
+	// ParentToolCallID links a sub-agent frame back to the root agent's
+	// tool_call that triggered the sub-agent run. Only set when Agent is
+	// non-empty. Mirrors the persisted SubAgentEvent.ParentToolCallID so
+	// the live stream and the message-history replay carry the same shape.
+	ParentToolCallID string `json:"parent_tool_call_id,omitempty"`
+
 	Content string `json:"content,omitempty"` // text / thinking / tool_result(ok=true)
 	Message string `json:"message,omitempty"` // error.message
 
@@ -56,10 +68,35 @@ type ToolEventRecord struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// SubAgentEvent is one persisted event from a sub-agent's internal run.
+//
+// Stored as an ordered array on message.Extra so the frontend can replay the
+// nested deep_research / sub-agent timeline after the conversation reloads.
+// `ParentToolCallID` links the sub-event back to the root agent's tool_call
+// that triggered the sub-agent, which keeps the door open for future nested
+// UI (collapse/expand under that tool card) without needing to re-derive
+// attribution from timing.
+type SubAgentEvent struct {
+	Seq              int    `json:"seq"`
+	Agent            string `json:"agent"`
+	ParentToolCallID string `json:"parent_tool_call_id,omitempty"`
+	Type             string `json:"type"` // thinking | text | tool_call | tool_result | error
+
+	// Optional payload by Type
+	Content    string `json:"content,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	ArgsJSON   string `json:"args_json,omitempty"`
+	OK         *bool  `json:"ok,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 // RunCollector accumulates the full record of a single agent run so the
 // service layer can persist it. It captures:
-//   - all ChatModel rounds' content + reasoning chunks (concatenated)
-//   - all tool call / result events in order
+//   - root agent's ChatModel content + reasoning (concatenated)
+//   - root agent's tool call / result events in order
+//   - sub-agent events kept separately so they don't pollute the root
+//     agent's final message content
 //
 // Thread safety: a single mutex guards all fields. The internal WaitGroup
 // tracks pending OnEndWithStreamOutputFn goroutines so callers can Wait()
@@ -70,6 +107,7 @@ type RunCollector struct {
 	content   strings.Builder
 	reasoning strings.Builder
 	tools     []ToolEventRecord
+	subEvents []SubAgentEvent
 }
 
 func NewRunCollector() *RunCollector {
@@ -101,6 +139,51 @@ func (c *RunCollector) Tools() []ToolEventRecord {
 	out := make([]ToolEventRecord, len(c.tools))
 	copy(out, c.tools)
 	return out
+}
+
+// SubEvents returns the recorded sub-agent timeline in arrival order.
+func (c *RunCollector) SubEvents() []SubAgentEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.subEvents) == 0 {
+		return nil
+	}
+	out := make([]SubAgentEvent, len(c.subEvents))
+	copy(out, c.subEvents)
+	return out
+}
+
+// ToolNameByID looks up the tool name we previously recorded for the given
+// tool_call ID. Used as a last-resort fallback when an event arrives with
+// neither a MessageVariant.ToolName nor a populated msg.Name (some provider
+// SDKs leave tool result names empty).
+func (c *RunCollector) ToolNameByID(id string) string {
+	if id == "" {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, t := range c.tools {
+		if t.ID == id {
+			return t.Name
+		}
+	}
+	for _, e := range c.subEvents {
+		if e.ToolCallID == id && e.Name != "" {
+			return e.Name
+		}
+	}
+	return ""
+}
+
+// AppendSubEvent records one sub-agent event. Seq is assigned by the
+// collector based on the current length so order is monotonic. Callers
+// fill in the rest of the fields.
+func (c *RunCollector) AppendSubEvent(ev SubAgentEvent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ev.Seq = len(c.subEvents) + 1
+	c.subEvents = append(c.subEvents, ev)
 }
 
 func (c *RunCollector) appendContent(s string) {
