@@ -70,9 +70,15 @@ Bridge 端的 index 跟 use 端语义一致：DOM 一动就废。每次操作前
 | `focus_page` | browser_id, page_id | 把 tab 提到前台 |
 | `close_tab` | browser_id, page_id | 关一个 tab（**谨慎，这是用户 Chrome**） |
 | `read_state` | browser_id, page_id | 拿编号 markdown |
-| `click` | browser_id, page_id, index, variant? | 点击；variant: click / dblclick / rightclick / hover |
+| `click` / `hover` / `dblclick` / `rightclick` | browser_id, page_id, index | 点击变体 |
 | `type` | browser_id, page_id, index, text | 填输入框 |
 | `press` | browser_id, page_id, key, index? | 键盘按键；index 省略作用于整页 |
+| `scroll` | browser_id, page_id, x, y, index? | 相对滚动，正 y = 向下 |
+| `wait_for` | browser_id, page_id, timeout_ms? | 等待页面稳定（默认 10s 上限） |
+| `go_back` / `reload` | browser_id, page_id | 浏览器导航 |
+| `extract` | browser_id, page_id, index, include_html? | 拿元素文本（可选 HTML） |
+| `describe_element` | browser_id, page_id, index | 拿元素稳定 selector / 属性，用于升级 index → CSS |
+| `execute_script` | browser_id, page_id, script | 跑任意 JS，返回值必须 JSON 可序列化 |
 
 ## 失败处理
 

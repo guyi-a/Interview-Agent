@@ -12,15 +12,19 @@ import (
 )
 
 type browserBridgeInput struct {
-	Action    string `json:"action" jsonschema:"description=One of: extension_status / list_sessions / list_pages / open_tab / focus_page / close_tab / read_state / click / type / press"`
-	BrowserID string `json:"browser_id,omitempty" jsonschema:"description=Extension-reported stable id from list_sessions. Required for everything except extension_status / list_sessions."`
-	PageID    string `json:"page_id,omitempty" jsonschema:"description=Page identifier from list_pages / open_tab. Required for focus_page / close_tab / read_state / click / type / press."`
-	URL       string `json:"url,omitempty" jsonschema:"description=Absolute URL for open_tab."`
-	Active    bool   `json:"active,omitempty" jsonschema:"description=For open_tab: whether the new tab should be foregrounded. Defaults true."`
-	Index     int    `json:"index,omitempty" jsonschema:"description=Element index from the last read_state. Required for click / type; optional for press."`
-	Variant   string `json:"variant,omitempty" jsonschema:"description=For click: click / dblclick / rightclick / hover. Defaults click."`
-	Text      string `json:"text,omitempty" jsonschema:"description=For type: what to fill into the element."`
-	Key       string `json:"key,omitempty" jsonschema:"description=For press: 'Enter' / 'Tab' / 'Escape' etc."`
+	Action      string `json:"action" jsonschema:"description=One of: extension_status / list_sessions / list_pages / open_tab / focus_page / close_tab / read_state / click / hover / dblclick / rightclick / type / press / scroll / wait_for / go_back / reload / extract / describe_element / execute_script"`
+	BrowserID   string `json:"browser_id,omitempty" jsonschema:"description=Extension-reported stable id from list_sessions. Required for everything except extension_status / list_sessions."`
+	PageID      string `json:"page_id,omitempty" jsonschema:"description=Page identifier from list_pages / open_tab. Required for every action that operates on a specific tab."`
+	URL         string `json:"url,omitempty" jsonschema:"description=Absolute URL for open_tab."`
+	Active      bool   `json:"active,omitempty" jsonschema:"description=For open_tab: whether the new tab should be foregrounded. Defaults true."`
+	Index       int    `json:"index,omitempty" jsonschema:"description=Element index from the last read_state. Required for click / hover / dblclick / rightclick / type / extract / describe_element; optional for scroll / press."`
+	Text        string `json:"text,omitempty" jsonschema:"description=For type: what to fill into the element."`
+	Key         string `json:"key,omitempty" jsonschema:"description=For press: 'Enter' / 'Tab' / 'Escape' etc."`
+	X           int    `json:"x,omitempty" jsonschema:"description=For scroll: horizontal pixels to scroll by (positive=right)."`
+	Y           int    `json:"y,omitempty" jsonschema:"description=For scroll: vertical pixels to scroll by (positive=down)."`
+	TimeoutMS   int    `json:"timeout_ms,omitempty" jsonschema:"description=For wait_for: max wait in milliseconds. Defaults to 10000."`
+	IncludeHTML bool   `json:"include_html,omitempty" jsonschema:"description=For extract: also return the element's outerHTML."`
+	Script      string `json:"script,omitempty" jsonschema:"description=For execute_script: JS expression or async function body returning a JSON-serialisable value."`
 }
 
 type browserBridgeOutput struct {
@@ -37,12 +41,14 @@ func newBrowserBridgeTool(svc *browserbridge.Service) (tool.BaseTool, error) {
 		return nil, errors.New("browser_bridge: service is nil")
 	}
 	desc := "Drive the user's own Chrome via the Kro Browser Bridge extension. " +
-		"Requires the user to have the extension installed and connected — always start with " +
-		"action='extension_status' to check. If ready=false, fall back to browser_use instead. " +
+		"Requires the extension to be installed and connected — always start with " +
+		"action='extension_status'. If ready=false, fall back to browser_use. " +
 		"Typical flow: extension_status → list_sessions (pick browser_id) → list_pages / open_tab → " +
-		"read_state (get index) → click/type/press by index → read_state again → ... . " +
+		"read_state (get index) → click/hover/dblclick/rightclick/type/press by index → read_state again. " +
+		"Additional actions: scroll (x/y), wait_for (timeout_ms), go_back / reload, extract " +
+		"(index + include_html), describe_element (upgrade index to stable selector), execute_script (raw JS). " +
 		"Element indices only stay valid until the DOM changes; re-read after every action. " +
-		"When the user's task is done, do NOT close their tabs unless they say so — this is their real browser."
+		"Do NOT close the user's tabs unless they explicitly ask — this is their real browser."
 	return utils.InferTool("browser_bridge", desc, func(ctx context.Context, in *browserBridgeInput) (*browserBridgeOutput, error) {
 		return dispatchBrowserBridge(ctx, svc, in)
 	})
@@ -111,15 +117,15 @@ func dispatchBrowserBridge(ctx context.Context, svc *browserbridge.Service, in *
 		}
 		return &browserBridgeOutput{OK: true, Data: data}, nil
 
-	case "click":
+	case "click", "hover", "dblclick", "rightclick":
 		if in.BrowserID == "" || in.PageID == "" || in.Index == 0 {
-			return &browserBridgeOutput{OK: false, Message: "click 需要 browser_id / page_id / index"}, nil
+			return &browserBridgeOutput{OK: false, Message: in.Action + " 需要 browser_id / page_id / index"}, nil
 		}
-		data, err := svc.Click(ctx, in.BrowserID, in.PageID, in.Index, in.Variant)
+		data, err := svc.Click(ctx, in.BrowserID, in.PageID, in.Index, in.Action)
 		if err != nil {
 			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
 		}
-		return &browserBridgeOutput{OK: true, Data: data, Message: fmt.Sprintf("%s index %d", chooseVariant(in.Variant), in.Index)}, nil
+		return &browserBridgeOutput{OK: true, Data: data, Message: fmt.Sprintf("%s index %d", in.Action, in.Index)}, nil
 
 	case "type":
 		if in.BrowserID == "" || in.PageID == "" || in.Index == 0 || in.Text == "" {
@@ -141,14 +147,77 @@ func dispatchBrowserBridge(ctx context.Context, svc *browserbridge.Service, in *
 		}
 		return &browserBridgeOutput{OK: true, Data: data}, nil
 
+	case "scroll":
+		if in.BrowserID == "" || in.PageID == "" {
+			return &browserBridgeOutput{OK: false, Message: "scroll 需要 browser_id / page_id"}, nil
+		}
+		data, err := svc.Scroll(ctx, in.BrowserID, in.PageID, in.X, in.Y, in.Index)
+		if err != nil {
+			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserBridgeOutput{OK: true, Data: data, Message: fmt.Sprintf("scrolled by (%d,%d)", in.X, in.Y)}, nil
+
+	case "wait_for":
+		if in.BrowserID == "" || in.PageID == "" {
+			return &browserBridgeOutput{OK: false, Message: "wait_for 需要 browser_id / page_id"}, nil
+		}
+		data, err := svc.WaitFor(ctx, in.BrowserID, in.PageID, in.TimeoutMS)
+		if err != nil {
+			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserBridgeOutput{OK: true, Data: data, Message: "wait done"}, nil
+
+	case "go_back":
+		if in.BrowserID == "" || in.PageID == "" {
+			return &browserBridgeOutput{OK: false, Message: "go_back 需要 browser_id / page_id"}, nil
+		}
+		data, err := svc.GoBack(ctx, in.BrowserID, in.PageID)
+		if err != nil {
+			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserBridgeOutput{OK: true, Data: data, Message: "navigated back"}, nil
+
+	case "reload":
+		if in.BrowserID == "" || in.PageID == "" {
+			return &browserBridgeOutput{OK: false, Message: "reload 需要 browser_id / page_id"}, nil
+		}
+		data, err := svc.Reload(ctx, in.BrowserID, in.PageID)
+		if err != nil {
+			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserBridgeOutput{OK: true, Data: data, Message: "reloaded"}, nil
+
+	case "extract":
+		if in.BrowserID == "" || in.PageID == "" || in.Index == 0 {
+			return &browserBridgeOutput{OK: false, Message: "extract 需要 browser_id / page_id / index"}, nil
+		}
+		data, err := svc.Extract(ctx, in.BrowserID, in.PageID, in.Index, in.IncludeHTML)
+		if err != nil {
+			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserBridgeOutput{OK: true, Data: data}, nil
+
+	case "describe_element":
+		if in.BrowserID == "" || in.PageID == "" || in.Index == 0 {
+			return &browserBridgeOutput{OK: false, Message: "describe_element 需要 browser_id / page_id / index"}, nil
+		}
+		data, err := svc.DescribeElement(ctx, in.BrowserID, in.PageID, in.Index)
+		if err != nil {
+			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserBridgeOutput{OK: true, Data: data}, nil
+
+	case "execute_script":
+		if in.BrowserID == "" || in.PageID == "" || in.Script == "" {
+			return &browserBridgeOutput{OK: false, Message: "execute_script 需要 browser_id / page_id / script"}, nil
+		}
+		data, err := svc.ExecuteScript(ctx, in.BrowserID, in.PageID, in.Script)
+		if err != nil {
+			return &browserBridgeOutput{OK: false, Message: err.Error()}, nil
+		}
+		return &browserBridgeOutput{OK: true, Data: data}, nil
+
 	default:
 		return &browserBridgeOutput{OK: false, Message: "unknown action: " + in.Action}, nil
 	}
-}
-
-func chooseVariant(v string) string {
-	if v == "" {
-		return "click"
-	}
-	return v
 }

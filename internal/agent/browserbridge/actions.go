@@ -145,3 +145,101 @@ func (s *Service) Press(ctx context.Context, browserID, pageID, key string, inde
 	}
 	return s.SendCommand(ctx, browserID, "browser_press", args)
 }
+
+func (s *Service) Scroll(ctx context.Context, browserID, pageID string, x, y int, index int) (map[string]interface{}, error) {
+	p, err := s.requirePage(browserID, pageID)
+	if err != nil {
+		return nil, err
+	}
+	args := map[string]interface{}{
+		"browser_id": browserID,
+		"page_id":    pageID,
+		"tab_id":     p.TabID,
+		"x":          x,
+		"y":          y,
+	}
+	if index > 0 {
+		args["index"] = index
+	}
+	return s.SendCommand(ctx, browserID, "browser_scroll", args)
+}
+
+func (s *Service) WaitFor(ctx context.Context, browserID, pageID string, timeoutMS int) (map[string]interface{}, error) {
+	p, err := s.requirePage(browserID, pageID)
+	if err != nil {
+		return nil, err
+	}
+	if timeoutMS <= 0 {
+		timeoutMS = 10000
+	}
+	return s.SendCommand(ctx, browserID, "browser_wait_for", map[string]interface{}{
+		"browser_id": browserID,
+		"page_id":    pageID,
+		"tab_id":     p.TabID,
+		"timeout_ms": timeoutMS,
+	})
+}
+
+func (s *Service) GoBack(ctx context.Context, browserID, pageID string) (map[string]interface{}, error) {
+	p, err := s.requirePage(browserID, pageID)
+	if err != nil {
+		return nil, err
+	}
+	return s.SendCommand(ctx, browserID, "browser_go_back", map[string]interface{}{
+		"browser_id": browserID,
+		"page_id":    pageID,
+		"tab_id":     p.TabID,
+	})
+}
+
+func (s *Service) Reload(ctx context.Context, browserID, pageID string) (map[string]interface{}, error) {
+	p, err := s.requirePage(browserID, pageID)
+	if err != nil {
+		return nil, err
+	}
+	return s.SendCommand(ctx, browserID, "browser_reload", map[string]interface{}{
+		"browser_id": browserID,
+		"page_id":    pageID,
+		"tab_id":     p.TabID,
+	})
+}
+
+func (s *Service) Extract(ctx context.Context, browserID, pageID string, index int, includeHTML bool) (map[string]interface{}, error) {
+	p, err := s.requirePage(browserID, pageID)
+	if err != nil {
+		return nil, err
+	}
+	return s.SendCommand(ctx, browserID, "browser_extract", map[string]interface{}{
+		"browser_id":   browserID,
+		"page_id":      pageID,
+		"tab_id":       p.TabID,
+		"index":        index,
+		"include_html": includeHTML,
+	})
+}
+
+func (s *Service) ExecuteScript(ctx context.Context, browserID, pageID, script string) (map[string]interface{}, error) {
+	p, err := s.requirePage(browserID, pageID)
+	if err != nil {
+		return nil, err
+	}
+	return s.SendCommand(ctx, browserID, "browser_execute_script", map[string]interface{}{
+		"browser_id": browserID,
+		"page_id":    pageID,
+		"tab_id":     p.TabID,
+		"script":     script,
+	})
+}
+
+func (s *Service) DescribeElement(ctx context.Context, browserID, pageID string, index int) (map[string]interface{}, error) {
+	p, err := s.requirePage(browserID, pageID)
+	if err != nil {
+		return nil, err
+	}
+	return s.SendCommand(ctx, browserID, "browser_describe_element", map[string]interface{}{
+		"browser_id": browserID,
+		"page_id":    pageID,
+		"tab_id":     p.TabID,
+		"index":      index,
+	})
+}
