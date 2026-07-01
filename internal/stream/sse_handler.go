@@ -179,9 +179,26 @@ func (c *RunCollector) ToolNameByID(id string) string {
 // AppendSubEvent records one sub-agent event. Seq is assigned by the
 // collector based on the current length so order is monotonic. Callers
 // fill in the rest of the fields.
+//
+// Consecutive thinking/text chunks from the same agent under the same
+// parent tool_call are merged into the previous entry so the persisted
+// sub_events array carries one prose block per agent turn instead of
+// one entry per token — mirrors what the frontend does for the live
+// SSE stream.
 func (c *RunCollector) AppendSubEvent(ev SubAgentEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if ev.Type == "thinking" || ev.Type == "text" {
+		if n := len(c.subEvents); n > 0 {
+			last := &c.subEvents[n-1]
+			if last.Type == ev.Type &&
+				last.Agent == ev.Agent &&
+				last.ParentToolCallID == ev.ParentToolCallID {
+				last.Content += ev.Content
+				return
+			}
+		}
+	}
 	ev.Seq = len(c.subEvents) + 1
 	c.subEvents = append(c.subEvents, ev)
 }

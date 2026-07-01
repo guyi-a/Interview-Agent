@@ -80,6 +80,32 @@ Bridge 端的 index 跟 use 端语义一致：DOM 一动就废。每次操作前
 | `describe_element` | browser_id, page_id, index | 拿元素稳定 selector / 属性，用于升级 index → CSS |
 | `execute_script` | browser_id, page_id, script | 跑任意 JS，返回值必须 JSON 可序列化 |
 
+## execute_script 硬约束（否则静默返 null）
+
+写脚本时**必须**遵守，不然扩展会静默吞异常返 `value: null`，无法诊断：
+
+1. **单行、无换行、无缩进** —— 脚本源码里不能出现 `\n`。多行写法（`\n` 分行 + 空格缩进）**必挂**。语句用 `;` 分隔全部塞到一行。理由：链路某一步对换行处理有 bug，参考项目一律用字符串拼接构建单行 JS
+2. **IIFE + 显式 return** —— `(function(){...return X;})()`。裸表达式 `"hello"`、`1+1` 一律返 null
+3. **不用双引号 `"`** —— 全部用单引号 `'`；对象字面量 key 不加引号（`{title:x}` 而不是 `{"title":x}`）。JSON.stringify 返回值里自然有 `"`，那是无所谓的
+4. **CSS 选择器里能不用嵌套引号就不用** —— `[class*=user-name]` 而不是 `[class*="user-name"]`（`user-name` 是合法 CSS3 ident）。含 `/` `:` 等非 ident 字符的属性值不得已才用嵌套引号
+5. **只读 DOM 及其 expando** —— `document.querySelector(...)` 拿到的元素上，Vue 挂的 `__vue__`、React 挂的内部 fiber 都能读（这些是 DOM 元素属性）。但 `window.某某` / `_PAGE` 之类的 page world 全局，扩展在 isolated world 大概率读不到，用 `try{}catch(e){}` 兜底
+6. **返回体控制在 KB 级** —— 一次抽取超过 20 条明显复杂对象容易返 null。分批 `slice(0, 10)`
+7. **null 一次即停** —— 返回 null 一次先 `wait_for` 2 秒重试；仍 null 停下报告，不要死循环猜
+
+**正例**（参考项目风格，压单行）：
+```js
+(function(){var n=document.querySelectorAll('.job-card-wrap').length;return n;})()
+```
+
+**反例（会挂）**：
+```js
+(function(){
+  var n = document.querySelectorAll('.job-card-wrap').length;
+  return n;
+})()
+```
+形式上是 IIFE，但**有换行** → 静默 null。
+
 ## 失败处理
 
 | 现象 | 措施 |

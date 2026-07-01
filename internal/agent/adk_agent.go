@@ -21,6 +21,7 @@ import (
 const (
 	SupervisorAgentName   = "supervisor"
 	DeepResearchAgentName = "deep_research"
+	JobSearchAgentName    = "job_search"
 )
 
 // ADKBundle 把 root agent 和 runner 一起暴露给上层。
@@ -63,7 +64,7 @@ func NewInterviewADKAgent(
 		Description:            "后台研究员：处理需要多步分析、规划、生成结构化报告的复杂任务（项目分析、生成题库、写学习计划等）。不要用于普通一问一答。",
 		ChatModel:              cm,
 		Instruction:            deepResearchInstruction,
-		MaxIteration:           16,
+		MaxIteration:           50,
 		WithoutWriteTodos:      true,
 		WithoutGeneralSubAgent: true,
 		ToolsConfig: adk.ToolsConfig{
@@ -82,11 +83,30 @@ func NewInterviewADKAgent(
 	// 2) 把 deep agent 包成 supervisor 的一个工具
 	deepTool := adk.NewAgentTool(ctx, deepAgent)
 
-	// 3) Supervisor 工具列表 = baseTools + deepTool
-	//    复制一份，避免修改调用方的 slice
-	supervisorTools := make([]tool.BaseTool, 0, len(baseTools)+1)
+	// 3) 招聘搜索员：跟 deep_research 平级的另一个 sub-agent。
+	//    工具集共用 baseTools（主要用 browser_bridge + load_skill）。
+	jobAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        JobSearchAgentName,
+		Description: "招聘信息搜索员：所有招聘/岗位/求职/找工作/Boss直聘类任务的**唯一入口**，supervisor 遇到这类请求必须走这里，不要自己调 browser_bridge 或 browser_use 硬走。给 request 传用户意图（岗位方向、城市、级别、想要几个），我会加载 bosszp skill、检查登录、抓取、返回结构化职位列表。",
+		Instruction: prompts.WithSkillsIndex(prompts.JobSearch, skillLoader),
+		Model:       cm,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               baseTools,
+				ToolCallMiddlewares: []compose.ToolMiddleware{toolerr.Middleware()},
+			},
+		},
+		MaxIterations: 50,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("adk.NewChatModelAgent(job_search): %w", err)
+	}
+	jobTool := adk.NewAgentTool(ctx, jobAgent)
+
+	// 4) Supervisor 工具列表 = baseTools + deep + job_search
+	supervisorTools := make([]tool.BaseTool, 0, len(baseTools)+2)
 	supervisorTools = append(supervisorTools, baseTools...)
-	supervisorTools = append(supervisorTools, deepTool)
+	supervisorTools = append(supervisorTools, deepTool, jobTool)
 
 	supervisor, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        SupervisorAgentName,
@@ -102,7 +122,7 @@ func NewInterviewADKAgent(
 			// Runner's iter so the UI can show real-time progress.
 			EmitInternalEvents: true,
 		},
-		MaxIterations: 12,
+		MaxIterations: 50,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("adk.NewChatModelAgent: %w", err)
