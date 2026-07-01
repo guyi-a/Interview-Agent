@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/guyi-a/Interview-Agent/internal/agent/browseruse"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/repository/model"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
@@ -18,6 +19,7 @@ type ProjectService struct {
 	repo          *repository.ProjectRepo
 	convRepo      *repository.ConversationRepo
 	manager       *stream.Manager
+	browserMgr    *browseruse.Manager
 	workspaceRoot string
 }
 
@@ -25,12 +27,14 @@ func NewProjectService(
 	repo *repository.ProjectRepo,
 	convRepo *repository.ConversationRepo,
 	manager *stream.Manager,
+	browserMgr *browseruse.Manager,
 	workspaceRoot string,
 ) *ProjectService {
 	return &ProjectService{
 		repo:          repo,
 		convRepo:      convRepo,
 		manager:       manager,
+		browserMgr:    browserMgr,
 		workspaceRoot: workspaceRoot,
 	}
 }
@@ -63,13 +67,19 @@ func (s *ProjectService) Delete(ctx context.Context, id string) error {
 		return nil
 	}
 
-	// Cancel any in-flight streams under this project before tearing down state.
-	if s.manager != nil && s.convRepo != nil {
+	// Cancel any in-flight streams under this project + close their browser
+	// sessions before tearing down DB state.
+	if s.convRepo != nil {
 		if convs, err := s.convRepo.ListByProject(ctx, id); err == nil {
 			for _, c := range convs {
-				if buf := s.manager.Get(c.ID); buf != nil {
-					buf.Cancel()
-					s.manager.Remove(c.ID)
+				if s.manager != nil {
+					if buf := s.manager.Get(c.ID); buf != nil {
+						buf.Cancel()
+						s.manager.Remove(c.ID)
+					}
+				}
+				if s.browserMgr != nil {
+					s.browserMgr.CloseSession(c.ID)
 				}
 			}
 		}

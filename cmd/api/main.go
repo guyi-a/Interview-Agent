@@ -14,7 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/guyi-a/Interview-Agent/internal/agent"
+	"github.com/guyi-a/Interview-Agent/internal/agent/browseruse"
 	"github.com/guyi-a/Interview-Agent/internal/agent/llm"
+	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/agent/tools"
 	"github.com/guyi-a/Interview-Agent/internal/config"
 	"github.com/guyi-a/Interview-Agent/internal/handler"
@@ -77,24 +79,37 @@ func main() {
 		log.Fatalf("llm.NewChatModel: %v", err)
 	}
 
+	browserMgr := browseruse.NewManager(browseruse.Config{
+		Headless: false,
+		Channel:  os.Getenv("PLAYWRIGHT_CHANNEL"),
+	})
+	defer browserMgr.Shutdown()
+
+	skillLoader, err := skills.NewLoader()
+	if err != nil {
+		log.Fatalf("skills.NewLoader: %v", err)
+	}
+
 	ts, err := tools.Builtin(ctx, tools.Deps{
 		WorkspaceRoot:    absWorkspaceRoot,
 		ProjectRepo:      projectRepo,
 		ConversationRepo: convRepo,
+		BrowserUseMgr:    browserMgr,
+		SkillLoader:      skillLoader,
 	})
 	if err != nil {
 		log.Fatalf("tools.Builtin: %v", err)
 	}
 
-	ag, err := agent.NewInterviewADKAgent(ctx, cm, ts)
+	ag, err := agent.NewInterviewADKAgent(ctx, cm, ts, skillLoader)
 	if err != nil {
 		log.Fatalf("agent.NewInterviewADKAgent: %v", err)
 	}
 
 	manager := stream.NewManager()
 	chatService := service.NewChatService(ag.Runner, ag.RootName, manager, convRepo, msgRepo, projectRepo)
-	convService := service.NewConversationService(convRepo, msgRepo, manager)
-	projectService := service.NewProjectService(projectRepo, convRepo, manager, absWorkspaceRoot)
+	convService := service.NewConversationService(convRepo, msgRepo, manager, browserMgr)
+	projectService := service.NewProjectService(projectRepo, convRepo, manager, browserMgr, absWorkspaceRoot)
 
 	chatHandler := handler.NewChatHandler(chatService)
 	convHandler := handler.NewConversationHandler(convService)

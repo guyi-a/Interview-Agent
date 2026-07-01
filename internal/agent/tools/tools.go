@@ -7,15 +7,19 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 
+	"github.com/guyi-a/Interview-Agent/internal/agent/browseruse"
+	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 )
 
 // Deps groups the dependencies the workspace + fs tools need at registration
 // time. They are captured into each tool's closure.
 type Deps struct {
-	WorkspaceRoot   string
-	ProjectRepo     *repository.ProjectRepo
+	WorkspaceRoot    string
+	ProjectRepo      *repository.ProjectRepo
 	ConversationRepo *repository.ConversationRepo
+	BrowserUseMgr    *browseruse.Manager
+	SkillLoader      *skills.Loader
 }
 
 // Builtin returns the full set of tools wired up with the given deps.
@@ -52,6 +56,26 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 			return nil, err
 		}
 		out = append(out, t)
+	}
+
+	if d.BrowserUseMgr != nil {
+		installTool, err := newBrowserUseInstallTool()
+		if err != nil {
+			return nil, err
+		}
+		bu, err := newBrowserUseTool(d.BrowserUseMgr)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, installTool, bu)
+	}
+
+	if d.SkillLoader != nil {
+		ls, err := newLoadSkillTool(d.SkillLoader)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ls)
 	}
 
 	return out, nil

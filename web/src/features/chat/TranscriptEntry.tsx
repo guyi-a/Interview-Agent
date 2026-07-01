@@ -194,6 +194,7 @@ function ToolEntry({ tool }: { tool: ToolCall }) {
   const hasArgs = argsParsed !== undefined && tool.argsJson !== "";
   const hasResult = Boolean(tool.content || tool.error);
   const expandable = hasArgs || hasResult;
+  const argLabel = toolArgLabel(argsParsed);
 
   const { dot, label, labelClass } = statusBits(tool.status);
 
@@ -211,6 +212,11 @@ function ToolEntry({ tool }: { tool: ToolCall }) {
           tool
         </span>
         <span className="text-ink">{tool.name || "(unnamed)"}</span>
+        {argLabel && (
+          <span className="text-muted normal-case tracking-normal truncate">
+            <span className="text-ink/70">{argLabel}</span>
+          </span>
+        )}
         <span
           className={cn("inline-flex items-center gap-1 shrink-0 ml-1", labelClass)}
         >
@@ -298,6 +304,16 @@ function prettyJson(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+function toolArgLabel(v: unknown): string {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "";
+  const args = v as Record<string, unknown>;
+  const action = args.action;
+  if (typeof action === "string" && action) return action;
+  const name = args.name;
+  if (typeof name === "string" && name) return name;
+  return "";
 }
 
 function truncate(s: string, n: number): string {

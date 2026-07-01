@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/prompts"
+	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
 )
 
@@ -45,10 +46,13 @@ func NewInterviewADKAgent(
 	ctx context.Context,
 	cm model.ToolCallingChatModel,
 	baseTools []tool.BaseTool,
+	skillLoader *skills.Loader,
 ) (*ADKBundle, error) {
 	if cm == nil {
 		return nil, fmt.Errorf("ToolCallingChatModel is nil")
 	}
+	supervisorInstruction := prompts.WithSkillsIndex(prompts.Supervisor, skillLoader)
+	deepResearchInstruction := prompts.WithSkillsIndex(prompts.DeepResearch, skillLoader)
 
 	// 1) 后台研究员
 	//    - 不带 Backend：继续用我们自己的 workspace/fs 工具（baseTools），不引入 ADK 原生 filesystem
@@ -58,7 +62,7 @@ func NewInterviewADKAgent(
 		Name:                   DeepResearchAgentName,
 		Description:            "后台研究员：处理需要多步分析、规划、生成结构化报告的复杂任务（项目分析、生成题库、写学习计划等）。不要用于普通一问一答。",
 		ChatModel:              cm,
-		Instruction:            prompts.DeepResearch,
+		Instruction:            deepResearchInstruction,
 		MaxIteration:           16,
 		WithoutWriteTodos:      true,
 		WithoutGeneralSubAgent: true,
@@ -87,7 +91,7 @@ func NewInterviewADKAgent(
 	supervisor, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        SupervisorAgentName,
 		Description: "通用生产力助手，必要时委派复杂分析任务给 deep_research。",
-		Instruction: prompts.Supervisor,
+		Instruction: supervisorInstruction,
 		Model:       cm,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
