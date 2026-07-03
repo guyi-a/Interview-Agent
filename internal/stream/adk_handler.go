@@ -261,6 +261,21 @@ func drainAssistantStream(
 			Total:            u.TotalTokens,
 		}))
 	}
+
+	// Record this turn's structured shape for the service layer's raw-row
+	// persistence. Only root events flow into turns — sub-agent internal
+	// turns live in collector.subEvents instead.
+	if isRoot && collector != nil {
+		tcs := make([]ToolCallRecord, 0, len(full.ToolCalls))
+		for _, tc := range full.ToolCalls {
+			tcs = append(tcs, ToolCallRecord{
+				ID:       tc.ID,
+				Name:     tc.Function.Name,
+				ArgsJSON: tc.Function.Arguments,
+			})
+		}
+		collector.OpenTurn(full.Content, full.ReasoningContent, tcs)
+	}
 	return nil
 }
 
@@ -307,6 +322,12 @@ func emitToolResult(
 		if collector != nil {
 			if isRoot {
 				collector.finishLastTool(false, "", errMsg)
+				collector.AttachToolResult(ToolResultRecord{
+					CallID: msg.ToolCallID,
+					Name:   name,
+					OK:     false,
+					Error:  errMsg,
+				})
 				router.noteRootToolResult(msg.ToolCallID)
 			} else {
 				collector.AppendSubEvent(SubAgentEvent{
@@ -335,6 +356,12 @@ func emitToolResult(
 	if collector != nil {
 		if isRoot {
 			collector.finishLastTool(true, msg.Content, "")
+			collector.AttachToolResult(ToolResultRecord{
+				CallID:  msg.ToolCallID,
+				Name:    name,
+				OK:      true,
+				Content: msg.Content,
+			})
 			router.noteRootToolResult(msg.ToolCallID)
 		} else {
 			collector.AppendSubEvent(SubAgentEvent{

@@ -5,6 +5,8 @@ import { useConversationStore } from "@/stores/conversations";
 import { useProjectStore } from "@/stores/projects";
 import { Transcript } from "@/features/chat/Transcript";
 import { PromptInput } from "@/features/chat/PromptInput";
+import { ConversationHeader } from "@/features/chat/ConversationHeader";
+import { WorkspacePanel } from "@/features/workspace/WorkspacePanel";
 
 export function Conversation() {
   const { id } = useParams();
@@ -15,7 +17,10 @@ export function Conversation() {
     | { pending?: string; projectId?: string }
     | null;
   const pending = state?.pending;
-  const projectId = state?.projectId;
+  const conversationProjectId = useConversationStore(
+    (s) => s.items.find((item) => item.id === id)?.project_id ?? undefined,
+  );
+  const projectId = state?.projectId ?? conversationProjectId ?? undefined;
 
   const touch = useConversationStore((s) => s.touch);
   const refreshConvs = useConversationStore((s) => s.refresh);
@@ -35,7 +40,7 @@ export function Conversation() {
   });
 
   const onSend = async (text: string) => {
-    touch(id, text.slice(0, 20), { projectId });
+    touch(id, text.trim(), { projectId });
     await send(text);
     refreshConvs();
     refreshProjects();
@@ -53,16 +58,25 @@ export function Conversation() {
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <p className="text-sm text-muted">加载会话…</p>
-      </div>
+      <>
+        <ConversationHeader conversationId={id} />
+        <div className="flex-1 flex items-center justify-center">
+          <p className="text-sm text-muted">加载会话…</p>
+        </div>
+      </>
     );
   }
 
   return (
     <>
-      <Transcript turns={turns} streaming={streaming} />
-      <PromptInput streaming={streaming} onSend={onSend} onCancel={cancel} />
+      <ConversationHeader conversationId={id} />
+      <div className="flex-1 min-h-0 flex">
+        <div className="flex-1 min-w-0 flex flex-col">
+          <Transcript turns={turns} streaming={streaming} />
+          <PromptInput streaming={streaming} onSend={onSend} onCancel={cancel} />
+        </div>
+        <WorkspacePanel streaming={streaming} projectId={projectId} />
+      </div>
     </>
   );
 }

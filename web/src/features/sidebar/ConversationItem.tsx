@@ -29,26 +29,27 @@ export function ConversationItem({
         to={`/c/${item.id}`}
         className={({ isActive }) =>
           cn(
-            "group block py-1.5 border-l-2 transition-colors",
-            indent ? "pl-7 pr-3" : "px-3",
+            "group block rounded-lg transition-colors",
+            indent ? "h-6 px-2.5" : "px-2.5 py-1.5",
             isActive
-              ? "border-accent bg-paper"
-              : "border-transparent hover:bg-paper",
+              ? "bg-rule/60 text-ink font-normal"
+              : "text-muted hover:bg-rule/70 hover:text-ink",
           )
         }
       >
-        <div className="flex items-center gap-2">
+        <div className="flex h-full min-h-5 items-center gap-2">
+          {indent ? <IndentSpacer /> : <MessageIcon />}
           <div className="flex-1 min-w-0">
             <div
               className={cn(
-                "truncate text-ink",
-                indent ? "text-[13px]" : "text-sm",
+                "truncate leading-5",
+                indent ? "text-xs" : "text-[13px]",
               )}
             >
               {item.title || "（未命名）"}
             </div>
             {!indent && (
-              <div className="font-mono text-[10px] tracking-wider uppercase text-muted mt-0.5">
+              <div className="font-mono text-[10px] tracking-wider uppercase text-muted/75 mt-0.5">
                 {formatRelative(item.updated_at)}
               </div>
             )}
@@ -57,12 +58,35 @@ export function ConversationItem({
             type="button"
             onClick={onDelete}
             aria-label="删除会话"
-            className="opacity-0 group-hover:opacity-100 text-muted hover:text-ink text-xs px-1 cursor-pointer transition-opacity"
+            className="opacity-0 group-hover:opacity-100 text-muted hover:text-ink text-xs px-1 cursor-pointer transition-opacity shrink-0"
           >
             ✕
           </button>
         </div>
       </NavLink>
     </li>
+  );
+}
+
+function IndentSpacer() {
+  return <span className="size-[23px] shrink-0" aria-hidden />;
+}
+
+function MessageIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="shrink-0 text-muted/85"
+    >
+      <path d="M2.5 4A1.5 1.5 0 0 1 4 2.5h8A1.5 1.5 0 0 1 13.5 4v5A1.5 1.5 0 0 1 12 10.5H6.5L3.5 13v-2.5H4A1.5 1.5 0 0 1 2.5 9V4Z" />
+    </svg>
   );
 }

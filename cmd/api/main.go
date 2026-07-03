@@ -114,16 +114,19 @@ func main() {
 	chatService := service.NewChatService(ag.Runner, ag.RootName, manager, convRepo, msgRepo, projectRepo)
 	convService := service.NewConversationService(convRepo, msgRepo, manager, browserMgr)
 	projectService := service.NewProjectService(projectRepo, convRepo, manager, browserMgr, absWorkspaceRoot)
+	workspaceService := service.NewWorkspaceService(convRepo, projectRepo)
 
 	chatHandler := handler.NewChatHandler(chatService)
 	convHandler := handler.NewConversationHandler(convService)
 	projectHandler := handler.NewProjectHandler(projectService)
+	workspaceHandler := handler.NewWorkspaceHandler(workspaceService)
 
 	r := gin.Default()
 	r.Use(corsMiddleware())
 	chatHandler.Register(r)
 	convHandler.Register(r)
 	projectHandler.Register(r)
+	workspaceHandler.Register(r)
 	browserbridge.Register(r, bridgeSvc)
 
 	srv := &http.Server{Addr: addr, Handler: r}

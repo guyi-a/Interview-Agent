@@ -47,34 +47,40 @@ export function ProjectGroup({
   };
 
   return (
-    <div className="group/project">
-      <div className="px-3 py-1.5 flex items-center gap-1.5">
+    <div className="group/project relative">
+      <div
+        className={cn(
+          "h-7 px-2.5 flex items-center gap-1.5 rounded-lg",
+          "hover:bg-rule/70 transition-colors",
+        )}
+      >
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-muted hover:text-ink cursor-pointer"
+          className="flex items-center gap-2 flex-1 min-w-0 text-left text-ink cursor-pointer"
         >
-          <span
-            className={cn(
-              "font-mono text-[9px] inline-block transition-transform shrink-0",
-              !open && "-rotate-90",
-            )}
-          >
-            ▾
-          </span>
-          <span className="text-[12px] truncate">
+          <ChevronIcon open={open} />
+          <FolderIcon />
+          <span className="text-[13px] leading-none truncate">
             {project.name || project.id}
           </span>
         </button>
         <span
           className={cn(
-            "font-mono text-[10px] text-muted/70 shrink-0",
+            "font-mono text-[10px] text-muted/60 shrink-0 tabular-nums",
             menuOpen ? "hidden" : "group-hover/project:hidden",
           )}
         >
           {conversations.length}
         </span>
-        <div className={cn("hidden", menuOpen ? "flex" : "group-hover/project:flex")}>
+        <span className="hidden size-6 shrink-0 group-hover/project:block" />
+        <div
+          className={cn(
+            "absolute right-2.5 flex h-7 items-center opacity-0 pointer-events-none",
+            "group-hover/project:opacity-100 group-hover/project:pointer-events-auto",
+            menuOpen && "opacity-100 pointer-events-auto",
+          )}
+        >
           <ProjectMenu
             project={project}
             open={menuOpen}
@@ -88,11 +94,9 @@ export function ProjectGroup({
       </div>
 
       {open && (
-        <ul>
+        <ul className="py-0.5">
           {conversations.length === 0 ? (
-            <li className="px-3 pl-7 py-1 text-[11px] text-muted/70">
-              无会话
-            </li>
+            <li className="px-2.5 py-1 text-[11px] text-muted/70">无会话</li>
           ) : (
             conversations.map((c) => (
               <ConversationItem key={c.id} item={c} indent />
@@ -114,6 +118,49 @@ export function ProjectGroup({
         onConfirm={onConfirmDelete}
       />
     </div>
+  );
+}
+
+// --- Icons ---
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className={cn(
+        "shrink-0 text-muted transition-transform duration-150",
+        open && "rotate-90",
+      )}
+    >
+      <path d="M4 2 L8 6 L4 10" />
+    </svg>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="shrink-0 text-muted/90"
+    >
+      <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3H6l1.5 1.5H12.5A1.5 1.5 0 0 1 14 6v6.5A1.5 1.5 0 0 1 12.5 14h-9A1.5 1.5 0 0 1 2 12.5V4.5Z" />
+    </svg>
   );
 }
 

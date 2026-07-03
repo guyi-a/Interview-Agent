@@ -31,7 +31,7 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 
 	timeTool, err := utils.InferTool(
 		"get_current_time",
-		"Get the current wall-clock time. Use when the user asks what time/date it is, or when the answer depends on the current moment.",
+		"Get the current wall-clock time. USE THIS whenever the user asks about now/today/current time or the answer depends on the current moment — NEVER guess, and NEVER answer from memory; the model's own knowledge of the current time is unreliable.",
 		currentTime,
 	)
 	if err != nil {
@@ -47,9 +47,12 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 
 	fs := &fsDeps{projectRepo: d.ProjectRepo, convRepo: d.ConversationRepo}
 	for _, ctor := range []func(*fsDeps) (tool.BaseTool, error){
+		newFileInfoTool,
 		newListFilesTool,
 		newReadFileTool,
+		newExtractDocumentTextTool,
 		newWriteFileTool,
+		newChunkedWriteFileTool,
 		newEditFileTool,
 		newMkdirTool,
 	} {

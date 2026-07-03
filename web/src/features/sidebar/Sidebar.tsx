@@ -4,10 +4,10 @@ import { useConversationStore } from "@/stores/conversations";
 import { useProjectStore } from "@/stores/projects";
 import { ConversationItem } from "./ConversationItem";
 import { ProjectGroup } from "./ProjectGroup";
-import { cn } from "@/lib/utils";
 
 export function Sidebar() {
   const navigate = useNavigate();
+  const [collapsed, setCollapsed] = useState(false);
   const conversations = useConversationStore((s) => s.items);
   const convLoading = useConversationStore((s) => s.loading);
   const refreshConv = useConversationStore((s) => s.refresh);
@@ -18,9 +18,6 @@ export function Sidebar() {
     refreshConv();
     refreshProjects();
   }, [refreshConv, refreshProjects]);
-
-  const [projectsOpen, setProjectsOpen] = useState(true);
-  const [adhocOpen, setAdhocOpen] = useState(true);
 
   const { adhocConversations, byProject } = useMemo(() => {
     const adhoc: typeof conversations = [];
@@ -40,53 +37,59 @@ export function Sidebar() {
   const onNew = () => navigate("/");
 
   return (
-    <aside className="w-64 shrink-0 border-r border-rule flex flex-col bg-subtle/30">
-      <div className="px-4 pt-5 pb-3">
-        <h1 className="font-mono text-[10px] tracking-[0.2em] uppercase text-muted">
-          Interview Agent
-        </h1>
-      </div>
+    <aside className="relative w-[280px] shrink-0 flex flex-col overflow-hidden rounded-[26px] bg-paper/92 shadow-[0_0_0_1px_var(--color-rule),0_18px_60px_oklch(0_0_0/0.08)] backdrop-blur transition-[width] duration-200 ease-out data-[collapsed=true]:w-16" data-collapsed={collapsed}>
+      <header className="shrink-0 h-2" aria-hidden />
 
-      <button
-        type="button"
-        onClick={onNew}
-        className="mx-3 mb-4 px-3 py-2 text-left text-sm border border-rule hover:border-ink hover:bg-paper transition-colors cursor-pointer"
-      >
-        <span className="font-mono text-[10px] tracking-[0.15em] uppercase text-muted mr-2">
-          New
-        </span>
-        <span>新建会话</span>
-      </button>
-
-      <nav className="flex-1 overflow-y-auto">
-        {/* PROJECTS section */}
-        <section className="mb-3">
+      {collapsed ? (
+        <div className="flex flex-col items-center gap-1 px-2 pt-0">
           <button
             type="button"
-            onClick={() => setProjectsOpen((v) => !v)}
-            className="w-full px-3 py-1 flex items-center gap-1.5 text-left cursor-pointer"
+            onClick={() => setCollapsed(false)}
+            aria-label="展开侧边栏"
+            title="展开侧边栏"
+            className="flex size-10 items-center justify-center rounded-xl text-muted transition-colors hover:bg-rule/70 hover:text-ink cursor-pointer"
           >
-            <span
-              className={cn(
-                "font-mono text-[9px] inline-block text-muted transition-transform",
-                !projectsOpen && "-rotate-90",
-              )}
-            >
-              ▾
-            </span>
-            <span className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted">
-              Projects
-            </span>
-            <span className="font-mono text-[10px] text-muted/60 ml-auto">
-              {projects.length}
-            </span>
+            <CollapseIcon collapsed />
           </button>
-          {projectsOpen && (
-            <div>
+          <button
+            type="button"
+            onClick={onNew}
+            aria-label="新建对话"
+            title="新建对话"
+            className="flex size-10 items-center justify-center rounded-xl text-muted transition-colors hover:bg-rule/70 hover:text-ink cursor-pointer"
+          >
+            <PlusIcon />
+          </button>
+        </div>
+      ) : (
+        <nav className="sidebar-scroll flex-1 overflow-y-auto pl-4 pr-1 pb-4 pt-0">
+          <div className="pr-3">
+            <div className="mb-1.5 flex h-10 w-full items-center rounded-xl transition-colors hover:bg-rule/70">
+              <button
+                type="button"
+                onClick={onNew}
+                className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 text-left text-[15px] font-medium text-ink cursor-pointer"
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center">
+                  <PlusIcon />
+                </span>
+                <span className="truncate">新建对话</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setCollapsed(true)}
+                aria-label="收缩侧边栏"
+                title="收缩侧边栏"
+                className="mr-1 flex size-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-paper/80 hover:text-ink cursor-pointer"
+              >
+                <CollapseIcon />
+              </button>
+            </div>
+
+            <GroupLabel label="Projects" count={projects.length} />
+            <div className="mb-3">
               {projects.length === 0 ? (
-                <p className="px-3 pl-7 py-1 text-[11px] text-muted/70">
-                  还没有项目
-                </p>
+                <p className="px-2.5 py-1 text-[11px] text-muted/70">还没有项目</p>
               ) : (
                 projects.map((p) => (
                   <ProjectGroup
@@ -97,48 +100,78 @@ export function Sidebar() {
                 ))
               )}
             </div>
-          )}
-        </section>
 
-        {/* AD-HOC section */}
-        <section>
-          <button
-            type="button"
-            onClick={() => setAdhocOpen((v) => !v)}
-            className="w-full px-3 py-1 flex items-center gap-1.5 text-left cursor-pointer"
-          >
-            <span
-              className={cn(
-                "font-mono text-[9px] inline-block text-muted transition-transform",
-                !adhocOpen && "-rotate-90",
-              )}
-            >
-              ▾
-            </span>
-            <span className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted">
-              Ad-hoc
-            </span>
-            <span className="font-mono text-[10px] text-muted/60 ml-auto">
-              {adhocConversations.length}
-            </span>
-          </button>
-          {adhocOpen && (
-            <ul>
-              {convLoading && conversations.length === 0 ? (
-                <li className="px-3 py-2 text-xs text-muted">加载中…</li>
-              ) : adhocConversations.length === 0 ? (
-                <li className="px-3 py-2 text-[11px] text-muted/70">
-                  没有 ad-hoc 会话
-                </li>
-              ) : (
-                adhocConversations.map((c) => (
-                  <ConversationItem key={c.id} item={c} />
-                ))
-              )}
-            </ul>
-          )}
-        </section>
-      </nav>
+            {(adhocConversations.length > 0 ||
+              (convLoading && conversations.length === 0)) && (
+              <>
+                <GroupLabel label="Ad-hoc" count={adhocConversations.length} />
+                <ul>
+                  {convLoading && conversations.length === 0 ? (
+                    <li className="px-2.5 py-2 text-xs text-muted">加载中…</li>
+                  ) : (
+                    adhocConversations.map((c) => (
+                      <ConversationItem key={c.id} item={c} />
+                    ))
+                  )}
+                </ul>
+              </>
+            )}
+          </div>
+        </nav>
+      )}
     </aside>
+  );
+}
+
+function GroupLabel({ label, count }: { label: string; count: number }) {
+  return (
+    <div className="px-2.5 pt-1.5 pb-1 flex h-7 items-center gap-2">
+      <span className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted/70">
+        {label}
+      </span>
+      {count > 0 && (
+        <span className="font-mono text-[10px] text-muted/60">{count}</span>
+      )}
+    </div>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="shrink-0 text-muted"
+    >
+      <path d="M8 3v10M3 8h10" />
+    </svg>
+  );
+}
+
+function CollapseIcon({ collapsed = false }: { collapsed?: boolean }) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="shrink-0"
+    >
+      <rect x="2.5" y="3" width="11" height="10" rx="1.8" />
+      <path d="M6.5 3v10" />
+      {collapsed ? <path d="M9 6l2 2-2 2" /> : <path d="M11 6L9 8l2 2" />}
+    </svg>
   );
 }

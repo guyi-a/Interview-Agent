@@ -6,6 +6,7 @@ import {
   resumeChat,
   type PersistedMessage,
 } from "@/lib/api";
+import { useWorkspaceStore } from "@/features/workspace/store";
 
 export type ToolCall = {
   id: string;
@@ -72,6 +73,34 @@ type Frame = {
   project_name?: string;
   workspace_path?: string;
 };
+
+const WORKSPACE_TOOL_NAMES = new Set([
+  "write_file",
+  "edit_file",
+  "create_file",
+  "delete_file",
+  "rename_file",
+  "move_file",
+  "mkdir",
+  "create_directory",
+  "remove_file",
+  "shell",
+  "bash",
+  "run_shell",
+  "run_command",
+]);
+
+function mayAffectWorkspace(name?: string): boolean {
+  if (!name) return false;
+  const normalized = name.toLowerCase();
+  if (WORKSPACE_TOOL_NAMES.has(normalized)) return true;
+  return (
+    normalized.includes("file") ||
+    normalized.includes("workspace") ||
+    normalized.includes("shell") ||
+    normalized.includes("command")
+  );
+}
 
 function parseFrames(buffer: string): { frames: Frame[]; rest: string } {
   const frames: Frame[] = [];
@@ -149,6 +178,7 @@ async function runSSELoop(
     partial: Omit<SubAgentEvent, "seq" | "agent">,
   ) => void,
   onProjectBound: ((e: ProjectBoundEvent) => void) | undefined,
+  onWorkspaceChanged: (() => void) | undefined,
   onError: (msg: string) => void,
 ) {
   if (!res.ok || !res.body) {
@@ -202,6 +232,7 @@ async function runSSELoop(
                 content: f.ok ? f.content : undefined,
                 error: f.ok ? undefined : f.error ?? f.message,
               });
+              if (f.ok && mayAffectWorkspace(f.name)) onWorkspaceChanged?.();
             }
             break;
           case "error":
@@ -249,6 +280,7 @@ async function runSSELoop(
               content: f.ok ? f.content : undefined,
               error: f.ok ? undefined : f.error ?? f.message,
             });
+            if (f.ok && mayAffectWorkspace(f.name)) onWorkspaceChanged?.();
           }
           break;
         case "project_bound":
@@ -295,6 +327,9 @@ export function useChatStream(
   const abortRef = useRef<AbortController | null>(null);
   const onProjectBoundRef = useRef(opts?.onProjectBound);
   onProjectBoundRef.current = opts?.onProjectBound;
+  const refreshWorkspaceFiles = useWorkspaceStore((s) => s.refreshFiles);
+  const refreshWorkspaceFilesRef = useRef(refreshWorkspaceFiles);
+  refreshWorkspaceFilesRef.current = refreshWorkspaceFiles;
   const projectIdRef = useRef(opts?.projectId);
   projectIdRef.current = opts?.projectId;
 
@@ -393,6 +428,7 @@ export function useChatStream(
           upsertTool,
           appendSubEvent,
           onProjectBoundRef.current,
+          refreshWorkspaceFilesRef.current,
           setError,
         );
       } catch (err) {
@@ -405,6 +441,7 @@ export function useChatStream(
           setError(msg);
         }
       } finally {
+        refreshWorkspaceFilesRef.current();
         setStreaming(false);
         if (abortRef.current === controller) abortRef.current = null;
       }

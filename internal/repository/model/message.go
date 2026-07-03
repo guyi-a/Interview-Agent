@@ -11,6 +11,7 @@ type Message struct {
 	ReasoningContent string    `gorm:"type:text"`
 	ToolCalls        string    `gorm:"type:text"`
 	ToolCallID       string    `gorm:"type:varchar(64)"`
+	ToolName         string    `gorm:"type:varchar(128)"`
 	Extra            string    `gorm:"type:text"`
 	CreatedAt        time.Time
 }

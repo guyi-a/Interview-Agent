@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	maxReadBytes  = 256 * 1024  // 256 KiB
-	maxWriteBytes = 1024 * 1024 // 1 MiB
+	maxReadBytes    = 256 * 1024  // 256 KiB
+	maxWriteBytes   = 1024 * 1024 // 1 MiB
+	binarySniffSize = 512
 )
 
 // fsDeps is the shared closure state for all fs tools.
@@ -33,10 +34,88 @@ func (d *fsDeps) resolveWorkspace(ctx context.Context) (string, error) {
 	return resolveConversationWorkspace(ctx, d.convRepo, d.projectRepo)
 }
 
+// classifyByExt buckets a lowercase extension (with dot) into a stable
+// kind string. Values are:
+//
+//	directory  — path is a directory (caller sets this, not returned here)
+//	text       — plain text (.txt, .log, empty ext)
+//	markdown   — .md / .markdown
+//	code       — recognized programming/config file
+//	csv        — .csv or .tsv
+//	ipynb      — Jupyter notebook (JSON on disk)
+//	pdf/docx/xlsx/pptx  — Office / PDF
+//	image / archive / video / audio  — known binary categories
+//	unknown    — everything else; binary status must be sniffed
+func classifyByExt(ext string) string {
+	switch ext {
+	case ".md", ".markdown":
+		return "markdown"
+	case ".txt", ".log", "":
+		return "text"
+	case ".go", ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+		".mts", ".cts",
+		".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+		".rs", ".rb", ".php", ".sh", ".bash", ".zsh",
+		".sql", ".html", ".htm", ".css", ".scss", ".xml",
+		".yaml", ".yml", ".toml", ".json", ".jsonc",
+		".ini", ".env", ".swift", ".kt", ".dart":
+		return "code"
+	case ".csv", ".tsv":
+		return "csv"
+	case ".ipynb":
+		return "ipynb"
+	case ".pdf":
+		return "pdf"
+	case ".docx":
+		return "docx"
+	case ".xlsx":
+		return "xlsx"
+	case ".pptx":
+		return "pptx"
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico":
+		return "image"
+	case ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar":
+		return "archive"
+	case ".mp4", ".webm", ".mov", ".mkv", ".m4v", ".ogv":
+		return "video"
+	case ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac":
+		return "audio"
+	default:
+		return "unknown"
+	}
+}
+
+// suggestedToolFor returns the recommended next tool for a given kind.
+// Kinds that we can't currently read return "no_reader_available" so the
+// agent knows to stop trying and tell the user.
+func suggestedToolFor(kind string) string {
+	switch kind {
+	case "directory":
+		return "list_files"
+	case "text", "markdown", "code", "csv", "ipynb":
+		return "read_file"
+	case "pdf", "docx":
+		return "extract_document_text"
+	default:
+		return "no_reader_available"
+	}
+}
+
+// hasNullByte returns true if any byte in b is a NUL — a fast (if crude)
+// heuristic for detecting binary content when we don't trust the extension.
+func hasNullByte(b []byte) bool {
+	for _, c := range b {
+		if c == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // --- list_files ---
 
 type ListFilesInput struct {
-	Path string `json:"path" jsonschema:"description=Path to list. Relative to the workspace root (default '.' = workspace root)."`
+	Path string `json:"path" jsonschema:"description=Directory to list. Either an absolute local path (any location on the user's machine) or relative to the current workspace root. Default '.' = workspace root."`
 }
 
 type ListFilesEntry struct {
@@ -53,15 +132,16 @@ type ListFilesOutput struct {
 
 func newListFilesTool(d *fsDeps) (tool.BaseTool, error) {
 	fn := func(ctx context.Context, in *ListFilesInput) (*ListFilesOutput, error) {
-		ws, err := d.resolveWorkspace(ctx)
-		if err != nil {
-			return nil, err
-		}
 		p := in.Path
 		if p == "" {
 			p = "."
 		}
-		abs, err := scope.Resolve(ws, p)
+		// Relative paths need a workspace; absolute paths bypass that check.
+		ws, wsErr := d.resolveWorkspace(ctx)
+		if wsErr != nil && !filepath.IsAbs(p) {
+			return nil, wsErr
+		}
+		abs, err := scope.ResolveRead(ws, p)
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +175,7 @@ func newListFilesTool(d *fsDeps) (tool.BaseTool, error) {
 	}
 	return utils.InferTool(
 		"list_files",
-		"List directory contents inside the current workspace. Returns each entry with name, type ('file'/'dir') and size. Default path is the workspace root.",
+		"List directory contents. Accepts an absolute local path (anywhere on the user's machine) or a workspace-relative path (default '.' = workspace root). Only list a directory when the user explicitly names it; don't wander into the user's system on your own.",
 		fn,
 	)
 }
@@ -103,7 +183,7 @@ func newListFilesTool(d *fsDeps) (tool.BaseTool, error) {
 // --- read_file ---
 
 type ReadFileInput struct {
-	Path string `json:"path" jsonschema:"description=File path to read. Relative to workspace root, or absolute inside workspace."`
+	Path string `json:"path" jsonschema:"description=File path to read. Either an absolute local path (any location on the user's machine) or relative to the current workspace root."`
 }
 
 type ReadFileOutput struct {
@@ -118,11 +198,14 @@ func newReadFileTool(d *fsDeps) (tool.BaseTool, error) {
 		if in.Path == "" {
 			return nil, fmt.Errorf("path is required")
 		}
-		ws, err := d.resolveWorkspace(ctx)
-		if err != nil {
-			return nil, err
+		// Relative paths still need a workspace; absolute paths bypass the
+		// workspace-required check. resolveWorkspace's error is only fatal
+		// when the caller supplied a relative path.
+		ws, wsErr := d.resolveWorkspace(ctx)
+		if wsErr != nil && !filepath.IsAbs(in.Path) {
+			return nil, wsErr
 		}
-		abs, err := scope.Resolve(ws, in.Path)
+		abs, err := scope.ResolveRead(ws, in.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -131,7 +214,7 @@ func newReadFileTool(d *fsDeps) (tool.BaseTool, error) {
 			return nil, fmt.Errorf("stat: %w", err)
 		}
 		if st.IsDir() {
-			return nil, fmt.Errorf("%q is a directory", in.Path)
+			return nil, fmt.Errorf("%q is a directory; use list_files instead", in.Path)
 		}
 		f, err := os.Open(abs)
 		if err != nil {
@@ -142,6 +225,28 @@ func newReadFileTool(d *fsDeps) (tool.BaseTool, error) {
 		n, err := f.Read(buf)
 		if err != nil && n == 0 {
 			return nil, fmt.Errorf("read: %w", err)
+		}
+		// Binary reject — don't return garbage. Sniff the first N bytes and
+		// bail with a kind-aware suggestion so the agent can pick another
+		// tool (extract_document_text for pdf/docx, etc.) instead of dumping
+		// mojibake into context.
+		sniffLen := n
+		if sniffLen > binarySniffSize {
+			sniffLen = binarySniffSize
+		}
+		if hasNullByte(buf[:sniffLen]) {
+			kind := classifyByExt(strings.ToLower(filepath.Ext(abs)))
+			suggest := suggestedToolFor(kind)
+			if suggest == "read_file" || suggest == "no_reader_available" {
+				return nil, fmt.Errorf(
+					"file %q appears to be binary (kind=%s); call file_info for details, no supported text reader for this type",
+					in.Path, kind,
+				)
+			}
+			return nil, fmt.Errorf(
+				"file %q appears to be binary (kind=%s); use %s instead",
+				in.Path, kind, suggest,
+			)
 		}
 		truncated := false
 		if n > maxReadBytes {
@@ -157,9 +262,117 @@ func newReadFileTool(d *fsDeps) (tool.BaseTool, error) {
 	}
 	return utils.InferTool(
 		"read_file",
-		fmt.Sprintf("Read a UTF-8 text file inside the workspace. Returns full content (truncated at %d KiB; check 'truncated').", maxReadBytes/1024),
+		fmt.Sprintf("Read a UTF-8 text file. Accepts an absolute local path (anywhere on the user's machine) or a workspace-relative path. Rejects binary files with a hint at the right tool (call file_info first if unsure). Returns full content (truncated at %d KiB; check 'truncated').", maxReadBytes/1024),
 		fn,
 	)
+}
+
+// --- file_info ---
+
+type FileInfoInput struct {
+	Path string `json:"path" jsonschema:"description=File or directory path to inspect. Absolute local path or workspace-relative."`
+}
+
+type FileInfoOutput struct {
+	Path          string `json:"path"`
+	Name          string `json:"name"`
+	Ext           string `json:"ext,omitempty"`
+	Size          int64  `json:"size"`
+	IsDir         bool   `json:"is_dir"`
+	IsText        bool   `json:"is_text"`
+	Kind          string `json:"kind"`
+	SuggestedTool string `json:"suggested_tool"`
+}
+
+func newFileInfoTool(d *fsDeps) (tool.BaseTool, error) {
+	fn := func(ctx context.Context, in *FileInfoInput) (*FileInfoOutput, error) {
+		if in.Path == "" {
+			return nil, fmt.Errorf("path is required")
+		}
+		ws, wsErr := d.resolveWorkspace(ctx)
+		if wsErr != nil && !filepath.IsAbs(in.Path) {
+			return nil, wsErr
+		}
+		abs, err := scope.ResolveRead(ws, in.Path)
+		if err != nil {
+			return nil, err
+		}
+		st, err := os.Stat(abs)
+		if err != nil {
+			return nil, fmt.Errorf("stat: %w", err)
+		}
+
+		out := &FileInfoOutput{
+			Path: abs,
+			Name: filepath.Base(abs),
+			Size: st.Size(),
+		}
+
+		if st.IsDir() {
+			out.IsDir = true
+			out.Kind = "directory"
+			out.SuggestedTool = suggestedToolFor("directory")
+			return out, nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(abs))
+		out.Ext = strings.TrimPrefix(ext, ".")
+		kind := classifyByExt(ext)
+
+		// Refine kind via a null-byte sniff for the "unknown" case, or to
+		// downgrade a "text-shaped" extension whose actual content is binary
+		// (rare but happens with mis-named files).
+		isText := isKnownText(kind)
+		if !isText && kind != "unknown" {
+			// Known-binary kind (pdf/docx/image/…): trust the extension.
+			out.Kind = kind
+			out.IsText = false
+			out.SuggestedTool = suggestedToolFor(kind)
+			return out, nil
+		}
+		// Sniff the first few bytes to decide.
+		f, err := os.Open(abs)
+		if err != nil {
+			return nil, fmt.Errorf("open: %w", err)
+		}
+		defer f.Close()
+		sniff := make([]byte, binarySniffSize)
+		n, _ := f.Read(sniff)
+		binary := hasNullByte(sniff[:n])
+
+		if binary {
+			// A text-shaped ext that's actually binary; call it out.
+			out.Kind = "binary"
+			out.IsText = false
+			out.SuggestedTool = suggestedToolFor("binary")
+			return out, nil
+		}
+		out.IsText = true
+		if kind == "unknown" {
+			// Unknown ext but content is text — treat as generic text.
+			out.Kind = "text"
+			out.SuggestedTool = suggestedToolFor("text")
+		} else {
+			out.Kind = kind
+			out.SuggestedTool = suggestedToolFor(kind)
+		}
+		return out, nil
+	}
+	return utils.InferTool(
+		"file_info",
+		"Inspect a file or directory: returns size, kind (text/markdown/code/csv/pdf/docx/image/directory/…), whether it's text or binary, and the recommended follow-up tool (read_file / extract_document_text / list_files / no_reader_available). Call this when unsure how to handle a path.",
+		fn,
+	)
+}
+
+// isKnownText tells us whether a kind is guaranteed to be text without
+// needing a content sniff (used by file_info to short-circuit).
+func isKnownText(kind string) bool {
+	switch kind {
+	case "text", "markdown", "code", "csv", "ipynb":
+		return true
+	}
+	return false
 }
 
 // --- write_file ---

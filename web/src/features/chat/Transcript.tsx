@@ -26,7 +26,7 @@ export function Transcript({
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="flex-1 overflow-y-auto scrollbar-subtle">
       <div className="max-w-3xl mx-auto px-8 py-10">
         {turns.map((t, i) => (
           <TranscriptEntry

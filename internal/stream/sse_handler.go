@@ -56,6 +56,43 @@ type Frame struct {
 	Total  int `json:"total,omitempty"`
 }
 
+// ToolCallRecord captures the shape of a single tool_call decided by an
+// assistant turn. Persisted verbatim on the assistant message's ToolCalls
+// column so history replay can reconstruct schema.Message.ToolCalls.
+type ToolCallRecord struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ArgsJSON string `json:"args_json,omitempty"`
+}
+
+// ToolResultRecord captures the outcome of one tool call. Persisted as its
+// own Role=tool row so the OpenAI/Anthropic tool_use ↔ tool_result pairing
+// survives across turns.
+type ToolResultRecord struct {
+	CallID  string `json:"call_id"`
+	Name    string `json:"name"`
+	OK      bool   `json:"ok"`
+	Content string `json:"content,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// AssistantTurnRecord is the persisted portion of a single root-agent
+// assistant turn — its content/reasoning (already concatenated from the
+// stream) plus any tool_calls it emitted.
+type AssistantTurnRecord struct {
+	Content          string           `json:"content,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCallRecord `json:"tool_calls,omitempty"`
+}
+
+// TurnRecord = one assistant message + the tool results that followed it.
+// The service layer serialises these into DB rows (1 assistant + N tool) in
+// order, preserving the tool_use / tool_result pairing Claude/OpenAI require.
+type TurnRecord struct {
+	Assistant   AssistantTurnRecord `json:"assistant"`
+	ToolResults []ToolResultRecord  `json:"tool_results,omitempty"`
+}
+
 // ToolEventRecord is the persisted shape of one tool call within an agent run.
 // Stored as a JSON array on message.Extra so the frontend can re-render tool
 // cards when the conversation is reloaded from history.
@@ -108,6 +145,12 @@ type RunCollector struct {
 	reasoning strings.Builder
 	tools     []ToolEventRecord
 	subEvents []SubAgentEvent
+	// turns is the turn-structured view of the same root-agent event stream.
+	// Populated by OpenTurn / AttachToolResult in parallel with the flat
+	// content/tools fields above. Used by the service layer to persist raw
+	// per-message rows (assistant + tool) so Claude's strict tool_use ↔
+	// tool_result pairing survives across conversation turns.
+	turns []TurnRecord
 }
 
 func NewRunCollector() *RunCollector {
@@ -219,6 +262,65 @@ func (c *RunCollector) startTool(id, name, args string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tools = append(c.tools, ToolEventRecord{ID: id, Name: name, ArgsJSON: args})
+}
+
+// OpenTurn records the end-of-stream state of one root-agent assistant turn.
+// Called from drainAssistantStream once the message stream has been fully
+// consumed and ConcatMessages has produced a `full` message. Subsequent
+// AttachToolResult calls will bind to this turn until the next OpenTurn.
+func (c *RunCollector) OpenTurn(content, reasoning string, toolCalls []ToolCallRecord) {
+	// Skip empty phantom turns: some providers emit an empty streaming event
+	// after tool results just to close the loop before the next real turn.
+	if content == "" && reasoning == "" && len(toolCalls) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.turns = append(c.turns, TurnRecord{
+		Assistant: AssistantTurnRecord{
+			Content:          content,
+			ReasoningContent: reasoning,
+			ToolCalls:        toolCalls,
+		},
+	})
+}
+
+// AttachToolResult binds one root-agent tool result to the most recent turn.
+// Only called for events with AgentName == rootName; sub-agent tool events
+// live in subEvents instead.
+func (c *RunCollector) AttachToolResult(r ToolResultRecord) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.turns) == 0 {
+		// Defensive: tool_result arrived before any OpenTurn. ADK's event
+		// ordering shouldn't produce this, but don't drop it — synthesize a
+		// placeholder turn so the result isn't orphaned.
+		c.turns = append(c.turns, TurnRecord{})
+	}
+	last := &c.turns[len(c.turns)-1]
+	last.ToolResults = append(last.ToolResults, r)
+}
+
+// Turns returns a defensive copy of the turn-structured record. Callers may
+// mutate the returned slice freely; the collector's internal state is
+// untouched.
+func (c *RunCollector) Turns() []TurnRecord {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.turns) == 0 {
+		return nil
+	}
+	out := make([]TurnRecord, len(c.turns))
+	for i, t := range c.turns {
+		out[i] = TurnRecord{Assistant: t.Assistant}
+		if len(t.Assistant.ToolCalls) > 0 {
+			out[i].Assistant.ToolCalls = append([]ToolCallRecord(nil), t.Assistant.ToolCalls...)
+		}
+		if len(t.ToolResults) > 0 {
+			out[i].ToolResults = append([]ToolResultRecord(nil), t.ToolResults...)
+		}
+	}
+	return out
 }
 
 func (c *RunCollector) finishLastTool(ok bool, content, errMsg string) {

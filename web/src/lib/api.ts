@@ -150,3 +150,92 @@ export async function cancelChat(id: string): Promise<void> {
     method: "POST",
   }).catch(() => {});
 }
+
+export type WorkspaceTreeEntry = {
+  path: string;
+  name: string;
+  is_dir: boolean;
+  size?: number;
+  modified_at: string;
+};
+
+export type WorkspaceMeta = {
+  project_id: string;
+  root_name: string;
+};
+
+export type WorkspaceTree = {
+  workspace: WorkspaceMeta;
+  entries: WorkspaceTreeEntry[];
+  truncated?: boolean;
+};
+
+export type WorkspaceFileKind =
+  | "markdown"
+  | "text"
+  | "image"
+  | "binary"
+  | "unsupported";
+
+export type WorkspaceFile = {
+  path: string;
+  name: string;
+  size: number;
+  mime?: string;
+  kind: WorkspaceFileKind;
+  is_binary: boolean;
+  content?: string;
+  truncated?: boolean;
+};
+
+export async function fetchWorkspaceTree(
+  conversationId: string,
+  opts?: { projectId?: string },
+  signal?: AbortSignal,
+): Promise<WorkspaceTree> {
+  const qs = opts?.projectId
+    ? `?project_id=${encodeURIComponent(opts.projectId)}`
+    : "";
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(conversationId)}/workspace/tree${qs}`,
+    { signal },
+  );
+  if (!res.ok) throw new Error(`fetchWorkspaceTree: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchWorkspaceFile(
+  conversationId: string,
+  path: string,
+  opts?: { projectId?: string },
+  signal?: AbortSignal,
+): Promise<WorkspaceFile> {
+  const params = new URLSearchParams({ path });
+  if (opts?.projectId) params.set("project_id", opts.projectId);
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(conversationId)}/workspace/file?${params.toString()}`,
+    { signal },
+  );
+  if (!res.ok) throw new Error(`fetchWorkspaceFile: ${res.status}`);
+  return res.json();
+}
+
+export function workspaceDownloadURL(
+  conversationId: string,
+  path: string,
+  opts?: { projectId?: string },
+): string {
+  const params = new URLSearchParams({ path });
+  if (opts?.projectId) params.set("project_id", opts.projectId);
+  return `${API_BASE}/conversations/${encodeURIComponent(conversationId)}/workspace/download?${params.toString()}`;
+}
+
+export function workspaceInlineURL(
+  conversationId: string,
+  path: string,
+  opts?: { projectId?: string },
+): string {
+  const params = new URLSearchParams({ path });
+  if (opts?.projectId) params.set("project_id", opts.projectId);
+  return `${API_BASE}/conversations/${encodeURIComponent(conversationId)}/workspace/inline?${params.toString()}`;
+}

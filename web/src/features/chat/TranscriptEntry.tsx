@@ -40,6 +40,59 @@ function CheckIcon() {
   );
 }
 
+function ThinkingCard({
+  content,
+  label,
+  dense,
+  streaming,
+  defaultOpen,
+}: {
+  content: string;
+  label: string;
+  dense?: boolean;
+  streaming?: boolean;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(Boolean(defaultOpen));
+  const trimmed = content?.trim() ?? "";
+  const isEmpty = trimmed.length === 0;
+  const clickable = !isEmpty;
+  return (
+    <div className={dense ? "my-2" : "my-3"}>
+      <button
+        type="button"
+        onClick={() => clickable && setOpen((o) => !o)}
+        disabled={!clickable}
+        className={cn(
+          "flex items-center gap-2 text-[13px] font-medium text-ink",
+          clickable && "hover:text-accent transition-colors cursor-pointer",
+          !clickable && "opacity-60",
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "inline-block size-1.5 rounded-full bg-accent",
+            streaming && "animate-pulse",
+          )}
+        />
+        <span>{label}</span>
+      </button>
+      {open && !isEmpty && (
+        <div
+          className={cn(
+            "mt-2 pl-4 border-l-2 border-ink/15",
+            "italic whitespace-pre-wrap text-muted leading-relaxed",
+            dense ? "text-[13px]" : "text-sm",
+          )}
+        >
+          {content}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -76,6 +129,11 @@ const ROLE_LABEL: Record<ChatTurn["role"], string> = {
   assistant: "INTERVIEWER",
 };
 
+// Sub-agent tools — wrapped via adk.NewAgentTool on the backend. When
+// these appear in tool_call events, label them as AGENT so the UI reflects
+// delegation, not a plain tool invocation.
+const AGENT_TOOL_NAMES = new Set(["job_search", "deep_research"]);
+
 export function TranscriptEntry({
   turn,
   showRule,
@@ -85,14 +143,22 @@ export function TranscriptEntry({
   showRule: boolean;
   streaming: boolean;
 }) {
+  const isUser = turn.role === "user";
   return (
     <article
       className={cn(
         "group",
-        showRule && "border-t border-rule pt-8 mt-8",
+        isUser && "ml-auto max-w-[85%] flex flex-col items-end",
+        showRule &&
+          (isUser ? "mt-8" : "border-t border-rule pt-8 mt-8"),
       )}
     >
-      <header className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-3 flex items-center gap-3">
+      <header
+        className={cn(
+          "font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-3 flex items-center gap-3",
+          isUser && "justify-end",
+        )}
+      >
         <span>{ROLE_LABEL[turn.role]}</span>
         <span aria-hidden="true">·</span>
         <span>{formatClock(turn.createdAt)}</span>
@@ -107,24 +173,44 @@ export function TranscriptEntry({
       </header>
 
       {turn.reasoning && (
-        <aside className="my-3 pl-4 border-l-2 border-ink/15 text-sm text-muted italic whitespace-pre-wrap leading-relaxed">
-          {turn.reasoning}
-        </aside>
+        <ThinkingCard
+          content={turn.reasoning}
+          label={streaming && !turn.content ? "Thinking" : "Thoughts"}
+          streaming={streaming && !turn.content}
+        />
       )}
 
       {turn.tools.length > 0 && (
         <div className="my-4 space-y-3">
           {turn.tools.map((tc) => (
-            <ToolEntry key={tc.id} tool={tc} />
+            <ToolEntry
+              key={tc.id}
+              tool={tc}
+              subEvents={turn.subEvents.filter(
+                (e) => e.parentToolCallId === tc.id,
+              )}
+            />
           ))}
         </div>
       )}
 
-      {turn.subEvents.length > 0 && (
-        <SubAgentTimeline events={turn.subEvents} />
-      )}
+      {(() => {
+        const orphans = turn.subEvents.filter(
+          (e) =>
+            !e.parentToolCallId ||
+            !turn.tools.some((t) => t.id === e.parentToolCallId),
+        );
+        return orphans.length > 0 ? (
+          <SubAgentTimeline events={orphans} />
+        ) : null;
+      })()}
 
-      <div className="text-ink">
+      <div
+        className={cn(
+          "text-ink",
+          isUser && "rounded-2xl bg-subtle px-4 py-3",
+        )}
+      >
         {turn.content ? (
           <MessageBody content={turn.content} streaming={streaming} />
         ) : (
@@ -139,145 +225,135 @@ export function TranscriptEntry({
   );
 }
 
-// SubAgentTimeline renders the captured events from sub-agents (e.g.
-// deep_research) for one assistant turn. It walks the events in arrival
-// order, coalesces matching tool_call + tool_result pairs into a single
-// ToolEntry card, and renders thinking / text / error as labeled prose.
-//
-// First-pass UX: everything is flat under one indented column with a faint
-// left rule, and each item carries a `↳ <agent>` chip so the user can tell
-// the supervisor's own events from the sub-agent's. We can switch to a
-// disclosure-style nested layout later by grouping on parentToolCallId.
+// SubAgentTimeline renders sub-agent events as a compact mini assistant turn:
+// all thinking is merged into one Thoughts card, all tools become tool cards,
+// and all text is merged into one markdown body. This mirrors the root agent
+// presentation instead of exposing the raw interleaved event stream.
 function SubAgentTimeline({ events }: { events: SubAgentEvent[] }) {
-  type ProseItem = {
-    kind: "prose";
+  type Block = {
     agent: string;
-    type: "thinking" | "text" | "error";
+    reasoning: string;
     content: string;
+    tools: ToolCall[];
+    errors: string[];
   };
-  type ToolItem = {
-    kind: "tool";
-    agent: string;
-    toolCallId: string;
-    name: string;
-    argsJson: string;
-    status: ToolCall["status"];
-    content?: string;
-    error?: string;
-  };
-  type Item = ProseItem | ToolItem;
 
-  const items: Item[] = [];
-  // toolCallId → index into items so a later tool_result can mutate the
-  // matching tool_call entry in place.
-  const toolIdx = new Map<string, number>();
+  const blocks: Block[] = [];
+  const blockByAgent = new Map<string, Block>();
+  const toolByID = new Map<string, ToolCall>();
+
+  const blockFor = (agent: string) => {
+    const existing = blockByAgent.get(agent);
+    if (existing) return existing;
+    const created: Block = {
+      agent,
+      reasoning: "",
+      content: "",
+      tools: [],
+      errors: [],
+    };
+    blockByAgent.set(agent, created);
+    blocks.push(created);
+    return created;
+  };
 
   for (const e of events) {
+    const block = blockFor(e.agent);
     if (e.type === "tool_call") {
       const id = e.toolCallId ?? "";
-      items.push({
-        kind: "tool",
-        agent: e.agent,
-        toolCallId: id,
+      const tool: ToolCall = {
+        id,
         name: e.name ?? "",
         argsJson: e.argsJson ?? "",
         status: "running",
-      });
-      toolIdx.set(id, items.length - 1);
+      };
+      block.tools.push(tool);
+      if (id) toolByID.set(id, tool);
     } else if (e.type === "tool_result") {
       const id = e.toolCallId ?? "";
-      const idx = toolIdx.get(id);
-      if (idx !== undefined) {
-        const prev = items[idx] as ToolItem;
-        items[idx] = {
+      const prev = toolByID.get(id);
+      if (prev) {
+        Object.assign(prev, {
           ...prev,
           name: prev.name || e.name || "",
           status: e.ok === false ? "error" : "ok",
           content: e.ok === false ? undefined : e.content,
           error: e.ok === false ? e.error : undefined,
-        };
+        });
       } else {
-        // Result without a matching call (shouldn't happen, but render
-        // defensively rather than dropping the event).
-        items.push({
-          kind: "tool",
-          agent: e.agent,
-          toolCallId: id,
+        const tool: ToolCall = {
+          id,
           name: e.name ?? "",
           argsJson: "",
           status: e.ok === false ? "error" : "ok",
           content: e.ok === false ? undefined : e.content,
           error: e.ok === false ? e.error : undefined,
-        });
+        };
+        block.tools.push(tool);
+        if (id) toolByID.set(id, tool);
       }
+    } else if (e.type === "thinking") {
+      block.reasoning += e.content ?? "";
+    } else if (e.type === "text") {
+      block.content += e.content ?? "";
     } else {
-      items.push({
-        kind: "prose",
-        agent: e.agent,
-        type: e.type,
-        content: e.content ?? e.error ?? "",
-      });
+      block.errors.push(e.error ?? e.content ?? "unknown error");
     }
   }
 
-  if (items.length === 0) return null;
+  if (blocks.length === 0) return null;
 
   return (
     <section className="my-4 pl-4 border-l border-ink/15 space-y-3">
-      {items.map((it, i) => {
-        if (it.kind === "prose") {
-          return (
-            <div key={i}>
-              <div className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-1">
-                ↳ {it.agent} · {it.type}
-              </div>
-              {it.type === "text" ? (
-                <div className="text-ink/80">
-                  <MessageBody content={it.content} dense />
-                </div>
-              ) : (
-                <div
-                  className={cn(
-                    "text-[13px] leading-relaxed whitespace-pre-wrap",
-                    it.type === "thinking" && "text-muted italic",
-                    it.type === "error" && "text-red-700",
-                  )}
-                >
-                  {it.content}
-                </div>
-              )}
+      {blocks.map((block) => (
+        <div key={block.agent} className="space-y-3">
+          {block.reasoning && (
+            <ThinkingCard
+              content={block.reasoning}
+              label="Thoughts"
+              dense
+              defaultOpen
+            />
+          )}
+          {block.tools.length > 0 && (
+            <div className="space-y-3">
+              {block.tools.map((tool, i) => (
+                <ToolEntry key={tool.id || `${block.agent}-${i}`} tool={tool} />
+              ))}
             </div>
-          );
-        }
-        const synthetic: ToolCall = {
-          id: it.toolCallId || `sub-${i}`,
-          name: it.name,
-          argsJson: it.argsJson,
-          status: it.status,
-          content: it.content,
-          error: it.error,
-        };
-        return (
-          <div key={i}>
-            <div className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted mb-1">
-              ↳ {it.agent}
+          )}
+          {block.content && (
+            <div className="text-ink/80">
+              <MessageBody content={block.content} dense />
             </div>
-            <ToolEntry tool={synthetic} />
-          </div>
-        );
-      })}
+          )}
+          {block.errors.map((err, i) => (
+            <div key={i} className="text-[13px] leading-relaxed whitespace-pre-wrap text-red-700">
+              {err}
+            </div>
+          ))}
+        </div>
+      ))}
     </section>
   );
 }
 
-function ToolEntry({ tool }: { tool: ToolCall }) {
+function ToolEntry({
+  tool,
+  subEvents,
+}: {
+  tool: ToolCall;
+  subEvents?: SubAgentEvent[];
+}) {
   const [open, setOpen] = useState(false);
 
   const argsParsed = tryParseJson(tool.argsJson);
   const hasArgs = argsParsed !== undefined && tool.argsJson !== "";
   const hasResult = Boolean(tool.content || tool.error);
-  const expandable = hasArgs || hasResult;
+  const hasSubEvents = Boolean(subEvents && subEvents.length > 0);
+  const expandable = hasArgs || hasResult || hasSubEvents;
   const argLabel = toolArgLabel(argsParsed);
+  const isAgent = AGENT_TOOL_NAMES.has(tool.name);
 
   const { dot, label, labelClass } = statusBits(tool.status);
 
@@ -291,8 +367,13 @@ function ToolEntry({ tool }: { tool: ToolCall }) {
           expandable && "cursor-pointer",
         )}
       >
-        <span className="text-[10px] tracking-[0.18em] uppercase text-muted shrink-0">
-          tool
+        <span
+          className={cn(
+            "text-[11px] tracking-[0.14em] uppercase font-semibold shrink-0",
+            isAgent ? "text-accent" : "text-ink/75",
+          )}
+        >
+          {isAgent ? "agent" : "tool"}
         </span>
         <span className="text-ink">{tool.name || "(unnamed)"}</span>
         {argLabel && (
@@ -301,7 +382,10 @@ function ToolEntry({ tool }: { tool: ToolCall }) {
           </span>
         )}
         <span
-          className={cn("inline-flex items-center gap-1 shrink-0 ml-1", labelClass)}
+          className={cn(
+            "inline-flex items-center gap-1.5 shrink-0 ml-1 text-[11px] uppercase tracking-[0.12em]",
+            labelClass,
+          )}
         >
           {dot}
           <span>{label}</span>
@@ -310,7 +394,10 @@ function ToolEntry({ tool }: { tool: ToolCall }) {
 
       {open && expandable && (
         <div className="mt-2 space-y-2">
-          {hasArgs && (
+          {hasSubEvents && subEvents && (
+            <SubAgentTimeline events={subEvents} />
+          )}
+          {!hasSubEvents && hasArgs && (
             <div>
               <div className="text-[9px] tracking-[0.2em] uppercase text-muted mb-1">
                 Args
@@ -320,7 +407,7 @@ function ToolEntry({ tool }: { tool: ToolCall }) {
               </pre>
             </div>
           )}
-          {tool.content && (
+          {!hasSubEvents && tool.content && (
             <div>
               <div className="text-[9px] tracking-[0.2em] uppercase text-muted mb-1">
                 Result
@@ -351,22 +438,60 @@ function statusBits(status: ToolCall["status"]): {
 } {
   if (status === "running") {
     return {
-      dot: <span className="size-1.5 rounded-full bg-accent animate-pulse" />,
-      label: "调用中",
-      labelClass: "text-muted",
+      dot: (
+        <span className="inline-block size-1.5 rounded-full bg-accent animate-pulse" />
+      ),
+      label: "running",
+      labelClass: "text-accent font-medium",
     };
   }
   if (status === "ok") {
     return {
-      dot: <span className="size-1.5 rounded-full bg-ink/40" />,
-      label: "已完成",
-      labelClass: "text-muted",
+      dot: (
+        <span
+          aria-hidden
+          className="inline-flex items-center justify-center size-3 text-emerald-600 leading-none"
+        >
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 12 12"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M2.5 6.5l2.5 2.5 4.5-5" />
+          </svg>
+        </span>
+      ),
+      label: "done",
+      labelClass: "text-emerald-600 font-medium",
     };
   }
   return {
-    dot: <span className="text-red-700">✕</span>,
-    label: "失败",
-    labelClass: "text-red-700",
+    dot: (
+      <span
+        aria-hidden
+        className="inline-flex items-center justify-center size-3 text-red-600 leading-none"
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 12 12"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M3 3l6 6M9 3l-6 6" />
+        </svg>
+      </span>
+    ),
+    label: "failed",
+    labelClass: "text-red-600 font-medium",
   };
 }
 
