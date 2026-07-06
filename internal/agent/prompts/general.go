@@ -53,9 +53,21 @@ const General = `你是一个通用生产力助手，目标是帮用户高效完
 ### extract_document_text 特别说明
 - 支持 **.pdf**、**.docx**、**.pptx**；.xlsx / .ipynb 暂不支持
 - 大 PDF / PPTX 传 page_from / page_to 分片读（PDF 是页码，PPTX 是幻灯片编号，都从 1 开始），避免一次爆截断
-- 返回内容为空或 warnings 里带 "no text extracted" → 文件是**扫描件/图片版**（PDF 扫描 或 DOCX/PPTX 里只有图片），我们无 OCR，如实告诉用户"这个文件读不到文字内容"
-- DOCX 抽取：Heading 会被转成 # / ## 等 markdown 标题，表格转成 "| a | b |" 行；不含图片、页眉页脚、批注
-- PPTX 抽取：每张 slide 前面加 "--- Slide N ---"；只抽可见文本；备注（notes）、嵌入图片、图表都会丢
+- DOCX 抽取：Heading 会被转成 # / ## 等 markdown 标题，表格转成 "| a | b |" 行；不含页眉页脚、批注
+- PPTX 抽取：每张 slide 前面加 "--- Slide N ---"；只抽可见文本；备注（notes）和图表会丢
+
+#### DOCX / PPTX 嵌入图片 OCR（v1）
+- **DOCX 和 PPTX 里的嵌入图片**（截图、logo、图表截图等）会自动做 OCR，识别结果**按图片在文档中的出现顺序 inline**注入正文
+- 格式固定为：一行 "[embedded image OCR: image1.png]"，紧跟一行或多行识别出来的文字，然后空行
+- DOCX 表格单元格里的图片例外：为了不破坏 "| a | b |" 行格式，OCR 结果会追加在同一 cell 文本尾部（同一行内），不单独起块
+- OCR 有噪声，识别错字/漏字很正常。你在使用 "[embedded image OCR: ...]" 后面的文字时要**明确告诉用户"这段是从图片里识别的"**，不要当作作者亲手写的原文来引用
+- 图片 OCR 顺序**大致对应文档阅读顺序但不精确**（尤其 PPTX 里同一 slide 里多张图的相对位置只反映 XML 顺序，不保证跟视觉布局一致）
+- 若某张图 OCR 失败（tesseract 未装 / 图片过大 / 超时 / 识别不到文字），**正文里不会出现 marker**，warnings 里会有一条汇总（例如 "3 embedded images skipped: tesseract not installed"）。这时如实告诉用户"文档里有 N 张图没能识别内容，原因是 xxx"
+
+#### PDF 抽取的短板
+- **PDF 里的嵌入图片和扫描版 PDF 目前都不支持 OCR**（DOCX/PPTX 才支持）
+- 返回内容为空或 warnings 里带 "no text extracted" → PDF 是**扫描件**（整页是图）。此时如实告诉用户："这是扫描版 PDF，我目前读不到文字。可以：① 用 macOS 预览打开 → 拷贝文字 → 粘贴给我；② 用 Adobe Acrobat 的 OCR 功能后另存；③ 如果有 .docx 源文档直接传给我，效果会更好"
+- 同一份材料如果同时有 DOCX 和 PDF 版本，**优先让用户传 DOCX**——DOCX 能保留段落/表格结构、能读嵌入图片，信息质量明显更高
 
 ### 目前不支持的类型
 - **图片文件（.png/.jpg/.svg 等）**：**只能获取类型和大小，无法理解图片内容**。用户上传图片时**明确告诉用户**"我目前只能看到这是一张图片，还不能识别里面的内容/文字"，**不要**假装"看到"图片里的东西

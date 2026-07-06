@@ -66,9 +66,9 @@ func newExtractDocumentTextTool(d *fsDeps) (tool.BaseTool, error) {
 		case ".pdf":
 			return extractPDF(abs, in.PageFrom, in.PageTo)
 		case ".docx":
-			return extractDOCX(abs)
+			return extractDOCX(ctx, abs)
 		case ".pptx":
-			return extractPPTX(abs, in.PageFrom, in.PageTo)
+			return extractPPTX(ctx, abs, in.PageFrom, in.PageTo)
 		case ".xlsx", ".ipynb":
 			return nil, fmt.Errorf(
 				"format %s is not yet supported by extract_document_text; supported: .pdf, .docx, .pptx",
@@ -86,9 +86,11 @@ func newExtractDocumentTextTool(d *fsDeps) (tool.BaseTool, error) {
 		"Extract plain text from a binary document. Supported: .pdf, .docx, .pptx. Not supported yet: .xlsx, .ipynb. "+
 			"PDF output has '--- Page N ---' markers; PPTX has '--- Slide N ---'; page_from / page_to (1-based, inclusive) limit the range for large PDFs / decks. "+
 			"DOCX output preserves paragraph breaks (blank line between), maps Heading1..Heading6 styles to '#'..'######', and flattens tables to '| a | b |' rows. "+
-			"PPTX output covers visible slide text; speaker notes, embedded images, and charts are dropped. "+
-			"Content is truncated at 256 KiB. "+
-			"If the returned content is empty or a warning mentions 'no text', the document is likely image-only — OCR is not supported.",
+			"PPTX output covers visible slide text; speaker notes and charts are dropped. "+
+			"DOCX/PPTX embedded images (screenshots, diagrams, etc.) are inline-OCR'd when tesseract is installed on the host: text appears as '[embedded image OCR: name.png]\\n{recognized text}' at the image's position in the document. "+
+			"If tesseract is missing or an image can't be OCR'd, no marker is inserted; a deduplicated summary lands in warnings (e.g. '3 embedded images skipped: tesseract not installed'). "+
+			"Scanned PDFs (whole-page images) are still unsupported — the returned content will be empty and a warning will say so; ask the user for a .docx source or an already-OCR'd PDF. "+
+			"Content is truncated at 256 KiB.",
 		fn,
 	)
 }

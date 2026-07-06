@@ -2,9 +2,11 @@ package tools
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -20,16 +22,25 @@ import (
 // slideFrom / slideTo (1-based, inclusive; 0 = unbounded) let callers page
 // through big decks without blowing the 256 KiB output cap.
 //
-// v1 covers: text runs (a:t), paragraph breaks (a:p), soft breaks (a:br).
-// v1 skips: notes (ppt/notesSlides), speaker comments, images, charts,
-// table borders. Notes / tables can be added later once we see real files
-// that need them.
-func extractPPTX(abs string, slideFrom, slideTo int) (*ExtractDocumentTextOutput, error) {
+// v1 covers: text runs (a:t), paragraph breaks (a:p), soft breaks (a:br),
+// embedded images (a:blip) → OCR'd inline at their XML position via the
+// shared collector. Each slide has its own rels file mapping rId → image
+// in ppt/media/.
+//
+// v1 skips: notes (ppt/notesSlides), speaker comments, charts, table borders.
+func extractPPTX(ctx context.Context, abs string, slideFrom, slideTo int) (*ExtractDocumentTextOutput, error) {
 	zr, err := zip.OpenReader(abs)
 	if err != nil {
 		return nil, fmt.Errorf("open pptx: %w", err)
 	}
 	defer zr.Close()
+
+	media := make(map[string]*zip.File)
+	for _, f := range zr.File {
+		if strings.HasPrefix(f.Name, "ppt/media/") {
+			media[f.Name] = f
+		}
+	}
 
 	slides, err := collectSlides(zr)
 	if err != nil {
@@ -42,6 +53,8 @@ func extractPPTX(abs string, slideFrom, slideTo int) (*ExtractDocumentTextOutput
 	total := len(slides)
 	from, to := clampPageRange(slideFrom, slideTo, total)
 
+	collector := newOCRCollector(ctx, docOCRBudget)
+
 	var buf strings.Builder
 	var warnings []string
 	truncated := false
@@ -51,13 +64,21 @@ func extractPPTX(abs string, slideFrom, slideTo int) (*ExtractDocumentTextOutput
 		if s.num < from || s.num > to {
 			continue
 		}
+
+		// Each slide has its own rels — load lazily.
+		var relMap map[string]*zip.File
+		if s.rels != nil {
+			relMap = parseOOXMLRels(s.rels, media, "ppt/slides/")
+		}
+
 		rc, err := s.f.Open()
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("slide %d: open: %v", s.num, err))
 			continue
 		}
-		text, err := parsePPTXSlide(rc)
+		text, slideWarnings, err := parsePPTXSlide(rc, relMap, collector)
 		rc.Close()
+		warnings = append(warnings, slideWarnings...)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("slide %d: parse: %v", s.num, err))
 			continue
@@ -67,7 +88,6 @@ func extractPPTX(abs string, slideFrom, slideTo int) (*ExtractDocumentTextOutput
 		}
 		header := fmt.Sprintf("--- Slide %d ---\n", s.num)
 		if buf.Len()+len(header)+len(text)+2 > maxExtractBytes {
-			// Fit the header + as much text as we can, then bail.
 			remaining := maxExtractBytes - buf.Len() - len(header) - 2
 			if remaining > 0 {
 				buf.WriteString(header)
@@ -86,9 +106,11 @@ func extractPPTX(abs string, slideFrom, slideTo int) (*ExtractDocumentTextOutput
 		buf.WriteString("\n\n")
 	}
 
+	warnings = append(warnings, collector.warnings()...)
+
 	if nonEmptyCount == 0 {
 		warnings = append(warnings,
-			"no text extracted from any slide — this PPTX may be image-only; OCR is not supported")
+			"no text extracted from any slide — this PPTX may be image-only")
 	}
 	if truncated {
 		warnings = append(warnings, fmt.Sprintf(
@@ -111,24 +133,51 @@ func extractPPTX(abs string, slideFrom, slideTo int) (*ExtractDocumentTextOutput
 }
 
 type pptxSlide struct {
-	num int
-	f   *zip.File
+	num  int
+	f    *zip.File
+	rels *zip.File // matching _rels/slideN.xml.rels, nil if the deck has no images
 }
 
-var pptxSlideRE = regexp.MustCompile(`^ppt/slides/slide(\d+)\.xml$`)
+var (
+	pptxSlideRE    = regexp.MustCompile(`^ppt/slides/slide(\d+)\.xml$`)
+	pptxSlideRelRE = regexp.MustCompile(`^ppt/slides/_rels/slide(\d+)\.xml\.rels$`)
+)
 
 func collectSlides(zr *zip.ReadCloser) ([]pptxSlide, error) {
-	var slides []pptxSlide
+	slidesByNum := map[int]*pptxSlide{}
 	for _, f := range zr.File {
-		m := pptxSlideRE.FindStringSubmatch(f.Name)
-		if m == nil {
+		if m := pptxSlideRE.FindStringSubmatch(f.Name); m != nil {
+			num, err := strconv.Atoi(m[1])
+			if err != nil {
+				continue
+			}
+			s := slidesByNum[num]
+			if s == nil {
+				s = &pptxSlide{num: num}
+				slidesByNum[num] = s
+			}
+			s.f = f
 			continue
 		}
-		num, err := strconv.Atoi(m[1])
-		if err != nil {
-			continue
+		if m := pptxSlideRelRE.FindStringSubmatch(f.Name); m != nil {
+			num, err := strconv.Atoi(m[1])
+			if err != nil {
+				continue
+			}
+			s := slidesByNum[num]
+			if s == nil {
+				s = &pptxSlide{num: num}
+				slidesByNum[num] = s
+			}
+			s.rels = f
 		}
-		slides = append(slides, pptxSlide{num: num, f: f})
+	}
+	slides := make([]pptxSlide, 0, len(slidesByNum))
+	for _, s := range slidesByNum {
+		if s.f == nil {
+			continue // rels without a slide xml — malformed, skip
+		}
+		slides = append(slides, *s)
 	}
 	sort.Slice(slides, func(i, j int) bool { return slides[i].num < slides[j].num })
 	return slides, nil
@@ -136,10 +185,11 @@ func collectSlides(zr *zip.ReadCloser) ([]pptxSlide, error) {
 
 // parsePPTXSlide walks a single slide's XML. DrawingML uses the `a:`
 // namespace: `<a:t>` for text runs, `<a:p>` for paragraphs, `<a:br/>` for
-// soft breaks inside a paragraph.
-func parsePPTXSlide(r io.Reader) (string, error) {
+// soft breaks inside a paragraph, `<a:blip r:embed="X"/>` for image refs.
+func parsePPTXSlide(r io.Reader, relMap map[string]*zip.File, oc *ocrCollector) (string, []string, error) {
 	var out strings.Builder
 	var para strings.Builder
+	var warnings []string
 
 	flushPara := func() {
 		text := strings.TrimRight(para.String(), " \t")
@@ -151,6 +201,43 @@ func parsePPTXSlide(r io.Reader) (string, error) {
 		out.WriteByte('\n')
 	}
 
+	emitImage := func(embedID string) {
+		if relMap == nil {
+			return
+		}
+		f, ok := relMap[embedID]
+		if !ok {
+			return
+		}
+		name := filepath.Base(f.Name)
+
+		data, err := readZipEntry(f)
+		if err != nil {
+			warnings = append(warnings,
+				fmt.Sprintf("read embedded image %s: %v", name, err))
+			return
+		}
+
+		text, ok := oc.tryOCR(data, name)
+		if !ok {
+			return
+		}
+
+		// Slides don't have DOCX's table/cell distinction — always emit as
+		// its own block. Flush any preceding text first so the "before"
+		// context stays with the image in reading order.
+		if strings.TrimSpace(para.String()) != "" {
+			flushPara()
+		} else {
+			para.Reset()
+		}
+		out.WriteString("[embedded image OCR: ")
+		out.WriteString(name)
+		out.WriteString("]\n")
+		out.WriteString(text)
+		out.WriteString("\n")
+	}
+
 	dec := xml.NewDecoder(r)
 	inT := false
 
@@ -160,7 +247,7 @@ func parsePPTXSlide(r io.Reader) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", warnings, err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -169,6 +256,13 @@ func parsePPTXSlide(r io.Reader) (string, error) {
 				inT = true
 			case "br":
 				para.WriteByte('\n')
+			case "blip":
+				for _, a := range t.Attr {
+					if a.Name.Local == "embed" && a.Value != "" {
+						emitImage(a.Value)
+						break
+					}
+				}
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
@@ -185,5 +279,5 @@ func parsePPTXSlide(r io.Reader) (string, error) {
 	}
 	flushPara()
 
-	return strings.TrimRight(out.String(), "\n"), nil
+	return strings.TrimRight(out.String(), "\n"), warnings, nil
 }
