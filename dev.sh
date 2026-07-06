@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Interview-Agent 一键开发启动 — backend (Go/Gin :9001) + frontend (Vite :5173)
+# Interview-Agent 一键开发启动 — backend (Go/Gin :9001) + frontend (Vite :5173) + Electron
 # 用法: ./dev.sh
 # 选项:
-#   --no-frontend   只起 backend
-#   --no-backend    只起 frontend
+#   --no-backend    只起 frontend + electron
+#   --no-frontend   只起 backend (电子壳也会跳过, 没前端可加载)
+#   --no-electron   不启动 Electron, 只在浏览器里跑
 #   --fresh         强制重新拉依赖 (go mod download + pnpm install)
 
 set -e
@@ -12,6 +13,7 @@ cd "$(dirname "$0")"
 
 WITH_BACKEND=1
 WITH_FRONTEND=1
+WITH_ELECTRON=1
 FRESH=0
 BACKEND_PORT=9001
 FRONTEND_PORT=5173
@@ -19,11 +21,12 @@ LOG_DIR="logs/dev"
 
 for arg in "$@"; do
   case "$arg" in
-    --no-frontend) WITH_FRONTEND=0 ;;
+    --no-frontend) WITH_FRONTEND=0; WITH_ELECTRON=0 ;;
     --no-backend)  WITH_BACKEND=0 ;;
+    --no-electron) WITH_ELECTRON=0 ;;
     --fresh)       FRESH=1 ;;
     -h|--help)
-      sed -n '2,7p' "$0"
+      sed -n '2,9p' "$0"
       exit 0 ;;
     *)
       echo "未知参数: $arg (用 --help 看用法)"
@@ -164,8 +167,53 @@ fi
 if [ "$WITH_FRONTEND" = "1" ]; then
   echo "  🎨 frontend : http://localhost:${FRONTEND_PORT}"
 fi
+
+# ── Electron (dev shell) ────────────────────────────────────────────────
+# Waits until the Vite dev server actually answers before launching so the
+# window doesn't open on a white "can't connect" screen. Bounded to ~20 s.
+# Skip via --no-electron; also auto-skipped when --no-frontend is set.
+if [ "$WITH_ELECTRON" = "1" ]; then
+  echo "🪟 启动 Electron 桌面壳..."
+
+  if [ "$FRESH" = "1" ] || [ ! -d "electron/node_modules" ]; then
+    echo "  → 拉 Electron 依赖 (pnpm install, 首次可能要几十秒)..."
+    pushd electron > /dev/null
+    pnpm install --silent
+    popd > /dev/null
+  fi
+
+  echo "  ⏳ 等待前端 http://localhost:${FRONTEND_PORT} ..."
+  for i in $(seq 1 40); do
+    if curl -sf "http://localhost:${FRONTEND_PORT}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.5
+    if [ "$i" = "40" ]; then
+      echo "  ⚠ 20s 前端仍未响应, 仍尝试启动 Electron (窗口可能白屏)"
+    fi
+  done
+
+  pushd electron > /dev/null
+  pnpm start > "../${LOG_DIR}/electron.log" 2>&1 &
+  ELECTRON_PID=$!
+  PIDS+=("$ELECTRON_PID")
+  popd > /dev/null
+
+  sleep 1
+  if ! kill -0 "$ELECTRON_PID" 2>/dev/null; then
+    echo "  ✗ Electron 进程已退出, 看 ${LOG_DIR}/electron.log 排查"
+    tail -20 "${LOG_DIR}/electron.log" | sed 's/^/    /'
+    cleanup
+  fi
+  echo "  🪟 electron  : 已启动 (INTERVIEW_ELECTRON_DEVTOOLS=0 可关闭 DevTools)"
+fi
+
 echo ""
-echo "  🪵 日志目录 : ${LOG_DIR}/ (backend.log / frontend.log)"
+if [ "$WITH_ELECTRON" = "1" ]; then
+  echo "  🪵 日志目录 : ${LOG_DIR}/ (backend.log / frontend.log / electron.log)"
+else
+  echo "  🪵 日志目录 : ${LOG_DIR}/ (backend.log / frontend.log)"
+fi
 echo "  按 Ctrl+C 停止所有服务"
 echo ""
 

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { formatClock, cn } from "@/lib/utils";
 import type { ChatTurn, SubAgentEvent, ToolCall } from "@/hooks/useChatStream";
 import { MessageBody } from "./MessageBody";
+import { UserAttachmentChips } from "./UserAttachmentChips";
+import { parseAttachmentMarkers } from "@/features/chat/attachments-store";
 
 function CopyIcon() {
   return (
@@ -211,11 +213,31 @@ export function TranscriptEntry({
           isUser && "rounded-2xl bg-subtle px-4 py-3",
         )}
       >
-        {turn.content ? (
-          <MessageBody content={turn.content} streaming={streaming} />
-        ) : (
-          streaming && <span className="text-muted">…</span>
-        )}
+        {(() => {
+          if (!isUser) {
+            return turn.content ? (
+              <MessageBody content={turn.content} streaming={streaming} />
+            ) : (
+              streaming && <span className="text-muted">…</span>
+            );
+          }
+          // User bubble: strip leading [file:]/[folder:] markers and render
+          // them as chips above the prose so the sent message mirrors what
+          // the composer showed just before send.
+          const { attachments, text } = parseAttachmentMarkers(turn.content);
+          return (
+            <>
+              {attachments.length > 0 && (
+                <UserAttachmentChips attachments={attachments} />
+              )}
+              {text ? (
+                <MessageBody content={text} streaming={streaming} />
+              ) : attachments.length === 0 && streaming ? (
+                <span className="text-muted">…</span>
+              ) : null}
+            </>
+          );
+        })()}
       </div>
 
       {turn.error && (

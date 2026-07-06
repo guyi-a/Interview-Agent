@@ -241,3 +241,14 @@
 .md-body-dense ul,
 .md-body-dense ol { padding-left: 1.3em; }
 .md-body-dense pre { margin: 0.6em 0; }
+
+/* Electron: mark regions that let the user drag the window by grabbing them
+ * (macOS traffic-light strip, empty toolbars, etc.). No-op in the browser.
+ * Any clickable child that must stay clickable inside a drag region needs
+ * .no-drag to opt back out. */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}

@@ -23,16 +23,27 @@ export function PromptInput({
   streaming,
   onSend,
   onCancel,
-  toolbarLeft,
+  leftActions,
+  rightActions,
+  topSlot,
+  hasAttachments = false,
 }: {
   streaming: boolean;
   onSend: (text: string) => void;
   onCancel: () => void;
-  // Optional slot rendered in the bottom-left of the composer toolbar,
-  // replacing the default "Enter 发送" hint. Used for per-conversation
-  // controls like the approval-mode dropdown that logically belong next to
-  // the input but shouldn't be baked into PromptInput.
-  toolbarLeft?: ReactNode;
+  // Bottom-left toolbar cluster. Typically the attach `+` button.
+  leftActions?: ReactNode;
+  // Bottom-right toolbar cluster (sits between the hint area and the send
+  // button). Typically the approval-mode dropdown.
+  rightActions?: ReactNode;
+  // Rendered inside the composer card, above the textarea. Used for the
+  // attachment chip strip so it visually belongs to this composer, not a
+  // separate hovering panel.
+  topSlot?: ReactNode;
+  // Lets the composer submit with an empty text field when the caller has
+  // other content lined up (attachments, quoted text, etc.). Without this,
+  // an attach-only message would be blocked by the empty-text guard.
+  hasAttachments?: boolean;
 }) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -47,11 +58,12 @@ export function PromptInput({
     el.style.height = `${el.scrollHeight}px`;
   }, [text]);
 
-  const canSend = text.trim().length > 0 && !streaming;
+  const canSend = (text.trim().length > 0 || hasAttachments) && !streaming;
 
   const submit = () => {
     const t = text.trim();
-    if (!t || streaming) return;
+    if (!t && !hasAttachments) return;
+    if (streaming) return;
     onSend(t);
     setText("");
     // Reset height explicitly — the effect will re-run on next render but
@@ -103,6 +115,7 @@ export function PromptInput({
             "focus-within:shadow-[0_0_0_3px_oklch(0.36_0.10_245/0.12)]",
           )}
         >
+          {topSlot}
           <textarea
             ref={textareaRef}
             rows={1}
@@ -121,44 +134,47 @@ export function PromptInput({
 
           <div className="flex items-center justify-between gap-3 px-3 pb-2.5 pt-1">
             <div className="flex items-center gap-2 pl-2 min-w-0">
-              {toolbarLeft ?? (
+              {leftActions ?? (
                 <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
                   {streaming ? "响应中" : "Enter 发送 · Shift+Enter 换行"}
                 </div>
               )}
             </div>
 
-            {streaming ? (
-              <button
-                type="button"
-                onClick={onCancel}
-                title="停止 (Esc)"
-                aria-label="停止响应"
-                className={cn(
-                  "flex h-9 w-9 items-center justify-center rounded-lg",
-                  "bg-ink text-paper transition-opacity",
-                  "hover:opacity-85 cursor-pointer",
-                )}
-              >
-                <StopIcon />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={submit}
-                disabled={!canSend}
-                title="发送 (Enter)"
-                aria-label="发送"
-                className={cn(
-                  "flex h-9 w-9 items-center justify-center rounded-lg transition-colors",
-                  canSend
-                    ? "bg-accent text-paper hover:bg-accent-hover cursor-pointer"
-                    : "bg-subtle text-muted cursor-not-allowed",
-                )}
-              >
-                <ArrowUpIcon />
-              </button>
-            )}
+            <div className="flex items-center gap-2 shrink-0">
+              {rightActions}
+              {streaming ? (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  title="停止 (Esc)"
+                  aria-label="停止响应"
+                  className={cn(
+                    "flex h-9 w-9 items-center justify-center rounded-lg",
+                    "bg-ink text-paper transition-opacity",
+                    "hover:opacity-85 cursor-pointer",
+                  )}
+                >
+                  <StopIcon />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!canSend}
+                  title="发送 (Enter)"
+                  aria-label="发送"
+                  className={cn(
+                    "flex h-9 w-9 items-center justify-center rounded-lg transition-colors",
+                    canSend
+                      ? "bg-accent text-paper hover:bg-accent-hover cursor-pointer"
+                      : "bg-subtle text-muted cursor-not-allowed",
+                  )}
+                >
+                  <ArrowUpIcon />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
