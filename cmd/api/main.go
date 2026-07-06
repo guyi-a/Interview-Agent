@@ -128,7 +128,7 @@ func main() {
 		pendingApprovals.Restore(rows)
 		log.Printf("restored %d pending approval(s) from DB", len(rows))
 	}
-	chatService := service.NewChatService(ag.Runner, ag.RootName, manager, convRepo, msgRepo, projectRepo, pendingApprovals, approvalModes)
+	chatService := service.NewChatService(ag.Runner, ag.RootName, manager, convRepo, msgRepo, projectRepo, pendingApprovals, approvalModes, cfg.LLM.Multimodal)
 	convService := service.NewConversationService(convRepo, msgRepo, manager, browserMgr)
 	projectService := service.NewProjectService(projectRepo, convRepo, manager, browserMgr, absWorkspaceRoot)
 	workspaceService := service.NewWorkspaceService(convRepo, projectRepo)

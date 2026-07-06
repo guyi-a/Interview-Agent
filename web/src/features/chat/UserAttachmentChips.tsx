@@ -1,10 +1,11 @@
 import { cn } from "@/lib/utils";
 import type { ParsedAttachment } from "@/features/chat/attachments-store";
+import { ImageTile } from "@/features/chat/ImageTile";
 
 // Read-only chip strip rendered inside a delivered user message bubble.
-// Same visual language as the composer's AttachmentChips (folder/file
-// icon + basename + tooltip on full path) minus the remove button —
-// the message has already been sent.
+// Images use the same ImageTile as the composer (click-to-enlarge) so
+// the user can still see what they sent after the message left. Files
+// and folders stay as compact chips.
 export function UserAttachmentChips({
   attachments,
 }: {
@@ -12,20 +13,45 @@ export function UserAttachmentChips({
 }) {
   if (attachments.length === 0) return null;
   return (
-    <div className="mb-2 flex flex-wrap gap-1.5">
-      {attachments.map((a, i) => (
-        <div
-          key={`${a.path}-${i}`}
-          title={a.path}
-          className={cn(
-            "inline-flex h-7 items-center gap-1.5 rounded-md",
-            "border border-rule/70 bg-paper/80 px-2 text-xs text-ink",
-          )}
-        >
-          {a.kind === "folder" ? <FolderIcon /> : <FileIcon />}
-          <span className="max-w-[280px] truncate">{a.name}</span>
-        </div>
-      ))}
+    <div className="mb-2 flex flex-wrap items-center gap-2">
+      {attachments.map((a, i) => {
+        if (a.kind === "image") {
+          return (
+            <ImageTile key={`${a.path}-${i}`} path={a.path} name={a.name} />
+          );
+        }
+        return (
+          <FileChip
+            key={`${a.path}-${i}`}
+            name={a.name}
+            path={a.path}
+            isDirectory={a.kind === "folder"}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function FileChip({
+  name,
+  path,
+  isDirectory,
+}: {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+}) {
+  return (
+    <div
+      title={path}
+      className={cn(
+        "inline-flex h-7 items-center gap-1.5 rounded-md",
+        "border border-rule/70 bg-paper/80 px-2 text-xs text-ink",
+      )}
+    >
+      {isDirectory ? <FolderIcon /> : <FileIcon />}
+      <span className="max-w-[280px] truncate">{name}</span>
     </div>
   );
 }

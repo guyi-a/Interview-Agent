@@ -27,7 +27,7 @@ export function ConversationHeader({
   }, [conversations, projects, conversationId]);
 
   return (
-    <header className="shrink-0 min-h-[50px] flex items-start gap-3 px-4 py-3 border-b border-rule bg-paper">
+    <header className="drag-region shrink-0 min-h-[50px] flex items-start gap-3 px-4 py-3 border-b border-rule bg-paper">
       <div className="min-w-0 flex-1 flex items-baseline gap-2.5">
         {projectName && (
           <span className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted shrink-0">
@@ -48,7 +48,7 @@ export function ConversationHeader({
         aria-pressed={panelOpen}
         title={panelOpen ? "关闭工作区" : "打开工作区"}
         className={cn(
-          "shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded",
+          "no-drag shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded",
           "text-[11px] font-mono uppercase tracking-[0.14em]",
           "cursor-pointer transition-colors",
           panelOpen

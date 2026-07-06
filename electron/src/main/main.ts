@@ -5,27 +5,44 @@
  * hits the Go backend directly on :9001 — no proxy, no API-base injection.
  *
  * IPC surface (kept intentionally tiny — see preload):
- *   'pick-files' → PickedLocalFile[]
- *     Native macOS file/folder picker. Returns { path, name, isDirectory }
- *     for each selected entry. isDirectory is determined here (main) via
- *     fs.stat so the renderer never touches Node APIs.
+ *   'pick-files'         → PickedLocalFile[]  (native file/folder picker)
+ *   'save-pasted-image'  → { path, name }     (persist pasted/dropped image
+ *                                              bytes to a scratch dir so the
+ *                                              backend can read from disk on
+ *                                              send AND on replay)
+ *
+ * Protocol surface:
+ *   local-file://<abs-path>                    (renderer <img> loads local
+ *                                              image files by absolute path
+ *                                              — chip thumbnails, etc.)
  *
  * Explicitly NOT doing: spawning the Go backend, port probing, packaging,
  * auto-update, generic IPC bridge.
- *
- * Run:
- *   cd electron && pnpm install     # postinstall patches macOS bundle id
- *   pnpm start                       # tsc + electron .   (backend + Vite must be up)
- *   # or from repo root:  ./dev.sh   (starts backend + Vite + Electron)
  */
 
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import { stat } from 'node:fs/promises';
+import { app, BrowserWindow, dialog, ipcMain, net, protocol } from 'electron';
+import { existsSync } from 'node:fs';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 
 const DEV_RENDERER_URL = 'http://localhost:5173';
 
 app.setName('Interview Agent');
+
+// local-file must be registered as privileged BEFORE app.whenReady per the
+// Electron contract; the handler is installed inside whenReady. Purpose:
+// give the renderer a scheme it can point <img> at for local image
+// thumbnails (chip previews, transcript replay). Dev-only shell + trusted
+// renderer, so no path allowlist — the renderer already knows the absolute
+// paths it received via pick-files / save-pasted-image.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'local-file',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
 
 // Structured result the renderer will see. Kept as an interface for the
 // preload's TS side (which shares this shape via manual duplication —
@@ -36,13 +53,54 @@ interface PickedLocalFile {
   isDirectory: boolean;
 }
 
+interface SavedPastedImage {
+  path: string;
+  name: string;
+}
+
+// Where pasted / dropped images go. Kept next to the backend's workspace
+// state so `<repo>/.workspace/` is the single Finder location a user can
+// look at to see everything the app writes to disk. Layout:
+//   <repo>/.workspace/
+//     <project-id>/          ← project workspaces (backend-owned)
+//     _attachments/          ← pasted / dropped images (this handler)
+//
+// The main.js file lives at <repo>/electron/out/main/main.js, so three
+// levels up from __dirname is the repo root. If that path doesn't
+// contain a .workspace/ (e.g. Electron is somehow launched detached from
+// the repo layout), fall back to Electron's per-app userData dir so
+// paste still works — just in a less-discoverable spot, with a warning.
+function attachmentsDir(): string {
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const preferred = path.join(repoRoot, '.workspace', '_attachments');
+  const workspaceRoot = path.join(repoRoot, '.workspace');
+  if (existsSync(workspaceRoot)) {
+    return preferred;
+  }
+  const fallback = path.join(app.getPath('userData'), 'attachments');
+  console.warn(
+    `[attachments] .workspace not found at ${workspaceRoot}, falling back to ${fallback}`,
+  );
+  return fallback;
+}
+
+// Best-effort file extension guess from a MIME type. Pasted images from
+// browsers usually arrive as image/png; drops carry their real extension
+// which the renderer can suggest to us.
+function extFromMime(mime: string): string {
+  switch (mime) {
+    case 'image/png': return '.png';
+    case 'image/jpeg': return '.jpg';
+    case 'image/webp': return '.webp';
+    case 'image/gif': return '.gif';
+    case 'image/bmp': return '.bmp';
+    default: return '.png';
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle('pick-files', async (): Promise<PickedLocalFile[]> => {
     const res = await dialog.showOpenDialog({
-      // Mixed file/folder selection with multi-select. No filters — filters
-      // interact poorly with openDirectory on macOS (folders vanish from
-      // the dialog when a file filter is active) and users can eyeball
-      // what they're picking.
       properties: ['openFile', 'openDirectory', 'multiSelections'],
     });
     if (res.canceled || res.filePaths.length === 0) return [];
@@ -65,6 +123,51 @@ function registerIpc(): void {
       }),
     );
   });
+
+  ipcMain.handle(
+    'save-pasted-image',
+    async (
+      _event,
+      payload: { bytes: Uint8Array; mimeType: string; suggestedName?: string },
+    ): Promise<SavedPastedImage> => {
+      // Renderer serialises Uint8Array over IPC as Buffer-alike; wrap
+      // explicitly so fs.writeFile is happy on all node versions.
+      const bytes = Buffer.from(payload.bytes);
+      const dir = attachmentsDir();
+      await mkdir(dir, { recursive: true });
+
+      const suggested = (payload.suggestedName ?? '').trim();
+      // Strip anything path-shaped from the suggested name to keep the
+      // filesystem hierarchy flat and predictable.
+      const safeSuggested = suggested
+        ? path.basename(suggested).replace(/[/\\]/g, '_')
+        : '';
+      const ext = safeSuggested
+        ? path.extname(safeSuggested).toLowerCase() || extFromMime(payload.mimeType)
+        : extFromMime(payload.mimeType);
+      const stem = safeSuggested
+        ? path.basename(safeSuggested, path.extname(safeSuggested)) || 'pasted'
+        : 'pasted';
+      const uuid = randomUUID().slice(0, 8);
+      const name = `${stem}-${uuid}${ext}`;
+      const abs = path.join(dir, name);
+
+      await writeFile(abs, bytes);
+      return { path: abs, name };
+    },
+  );
+}
+
+function registerLocalFileProtocol(): void {
+  protocol.handle('local-file', (req) => {
+    // URL shape: local-file://l/Users/guyi/Downloads/x.png
+    //   → host === 'l' (stub — see localFileURL in the renderer for why)
+    //   → pathname === '/Users/guyi/Downloads/x.png'
+    // Decode percent-encoded chars so paths with spaces / CJK work.
+    const url = new URL(req.url);
+    const abs = decodeURIComponent(url.pathname);
+    return net.fetch(pathToFileURL(abs).toString());
+  });
 }
 
 function createWindow(): void {
@@ -75,14 +178,8 @@ function createWindow(): void {
     height: 900,
     minWidth: 1024,
     minHeight: 640,
-    // Fully frameless — no title bar, no traffic lights. Close with ⌘W,
-    // minimise with ⌘M, hide with ⌘H. Window is still movable because the
-    // sidebar top strip is marked .drag-region in the renderer CSS.
     frame: false,
     webPreferences: {
-      // Modern secure defaults + a minimal preload that exposes exactly
-      // one function (pickFiles). Do NOT expand the preload into a generic
-      // IPC bridge — every additional surface is a security decision.
       contextIsolation: true,
       nodeIntegration: false,
       preload: preloadPath,
@@ -92,9 +189,6 @@ function createWindow(): void {
 
   win.loadURL(DEV_RENDERER_URL);
 
-  // DevTools is auto-opened by default because this build is dev-only, but
-  // it steals half the window and gets old fast for casual use. Set
-  // INTERVIEW_ELECTRON_DEVTOOLS=0 (or false/off/no) to launch without it.
   if (shouldOpenDevTools()) {
     win.webContents.openDevTools();
   }
@@ -108,6 +202,7 @@ function shouldOpenDevTools(): boolean {
 
 app.whenReady().then(() => {
   registerIpc();
+  registerLocalFileProtocol();
   createWindow();
 
   app.on('activate', () => {
@@ -117,7 +212,6 @@ app.whenReady().then(() => {
   });
 });
 
-// Dev shell: closing the last window ends the session on every platform.
 app.on('window-all-closed', () => {
   app.quit();
 });

@@ -1,8 +1,10 @@
 import { cn } from "@/lib/utils";
+import { isImagePath } from "@/lib/electron-api";
 import {
   useAttachmentsStore,
   type AttachedFile,
 } from "@/features/chat/attachments-store";
+import { ImageTile } from "@/features/chat/ImageTile";
 
 // Stable empty array — avoids returning a fresh [] from the Zustand
 // selector on every render, which would hang React in a max-update loop
@@ -18,32 +20,67 @@ export function AttachmentChips({ conversationID }: { conversationID: string }) 
   if (files.length === 0) return null;
 
   return (
-    <div className="flex flex-wrap gap-1.5 border-b border-rule/60 px-3 py-2">
-      {files.map((f) => (
-        <div
-          key={f.id}
-          title={f.path}
-          className={cn(
-            "group inline-flex h-7 items-center gap-1.5 rounded-md",
-            "border border-rule/70 bg-subtle/60 pl-1.5 pr-1 text-xs text-ink",
-          )}
-        >
-          {f.isDirectory ? <FolderIcon /> : <FileIcon />}
-          <span className="max-w-[220px] truncate">{f.name}</span>
-          <button
-            type="button"
-            aria-label={`移除 ${f.name}`}
-            onClick={() => remove(conversationID, f.id)}
-            className={cn(
-              "inline-flex size-4 items-center justify-center rounded",
-              "text-muted transition-colors",
-              "hover:bg-rule/70 hover:text-ink",
-            )}
-          >
-            <XIcon />
-          </button>
-        </div>
-      ))}
+    <div className="flex flex-wrap items-center gap-2 border-b border-rule/60 px-3 py-2">
+      {files.map((f) => {
+        const isImage = !f.isDirectory && isImagePath(f.name);
+        if (isImage) {
+          return (
+            <ImageTile
+              key={f.id}
+              path={f.path}
+              name={f.name}
+              removable
+              onRemove={() => remove(conversationID, f.id)}
+            />
+          );
+        }
+        return (
+          <FileChip
+            key={f.id}
+            name={f.name}
+            path={f.path}
+            isDirectory={f.isDirectory}
+            onRemove={() => remove(conversationID, f.id)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function FileChip({
+  name,
+  path,
+  isDirectory,
+  onRemove,
+}: {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  onRemove: () => void;
+}) {
+  return (
+    <div
+      title={path}
+      className={cn(
+        "group inline-flex h-7 items-center gap-1.5 rounded-md",
+        "border border-rule/70 bg-subtle/60 pl-2 pr-1 text-xs text-ink",
+      )}
+    >
+      {isDirectory ? <FolderIcon /> : <FileIcon />}
+      <span className="max-w-[220px] truncate">{name}</span>
+      <button
+        type="button"
+        aria-label={`移除 ${name}`}
+        onClick={onRemove}
+        className={cn(
+          "inline-flex size-4 items-center justify-center rounded",
+          "text-muted transition-colors",
+          "hover:bg-rule/70 hover:text-ink",
+        )}
+      >
+        <XIcon />
+      </button>
     </div>
   );
 }

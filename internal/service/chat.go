@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/contextkey"
+	"github.com/guyi-a/Interview-Agent/internal/agent/multimodal"
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
 	"github.com/guyi-a/Interview-Agent/internal/approval"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
@@ -26,6 +27,7 @@ type ChatService struct {
 	projectRepo   *repository.ProjectRepo
 	pending       *approval.PendingStore
 	approvalModes *approval.ModeStore
+	multimodal    bool
 }
 
 func NewChatService(
@@ -37,6 +39,7 @@ func NewChatService(
 	projectRepo *repository.ProjectRepo,
 	pending *approval.PendingStore,
 	approvalModes *approval.ModeStore,
+	multimodal bool,
 ) *ChatService {
 	return &ChatService{
 		runner:        runner,
@@ -47,6 +50,7 @@ func NewChatService(
 		projectRepo:   projectRepo,
 		pending:       pending,
 		approvalModes: approvalModes,
+		multimodal:    multimodal,
 	}
 }
 
@@ -96,11 +100,11 @@ func (s *ChatService) Start(ctx context.Context, id, userMsg, projectID string) 
 		return nil, err
 	}
 
-	history := toSchemaMessages(id, prior)
+	history := toSchemaMessages(id, prior, s.multimodal)
 	if workspaceContext := s.workspaceContext(ctx, id); workspaceContext != "" {
 		history = append([]*schema.Message{schema.SystemMessage(workspaceContext)}, history...)
 	}
-	history = append(history, schema.UserMessage(userMsg))
+	history = append(history, multimodal.BuildUserMessage(userMsg, s.multimodal))
 
 	if err := s.msgRepo.Append(ctx, &model.Message{
 		ConversationID: id,
@@ -200,7 +204,7 @@ func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schem
 	// enforced by manager.Create above, so reusing convID as the eino
 	// checkpoint id keeps resume lookups trivial.
 	iter := s.runner.Run(ctx, msgs, adk.WithCheckPointID(convID))
-	s.consumeAndPersist(ctx, convID, iter, sink, buf, collector)
+	s.consumeAndPersist(ctx, convID, iter, sink, buf, collector, nil)
 }
 
 func (s *ChatService) resumeAgent(
@@ -218,6 +222,17 @@ func (s *ChatService) resumeAgent(
 
 	_ = s.convRepo.SetAgentStatus(context.Background(), convID, "running")
 
+	// Rebuild the sub-agent router's open-parents map from persisted
+	// history so events emitted during resume (e.g. a sub-agent's
+	// interrupted write_file completing) can still be attributed to the
+	// supervisor-level tool_call that spawned them before the interrupt.
+	// See ConsumeADKEvents doc for the rationale.
+	priorRows, err := s.msgRepo.List(context.Background(), convID)
+	if err != nil {
+		log.Printf("resume: load prior rows (conv=%s): %v", convID, err)
+	}
+	initialRouter := rebuildOpenToolCalls(priorRows)
+
 	iter, err := s.runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
 		Targets: map[string]any{interruptID: dec},
 	})
@@ -227,7 +242,47 @@ func (s *ChatService) resumeAgent(
 		stream.FinalizeErr(buf, err)
 		return
 	}
-	s.consumeAndPersist(ctx, convID, iter, sink, buf, collector)
+	s.consumeAndPersist(ctx, convID, iter, sink, buf, collector, initialRouter)
+}
+
+// rebuildOpenToolCalls walks the conversation's persisted messages and
+// returns the sub-agent tool_calls that are still "open" — declared by an
+// assistant row but with no matching Role=Tool result row afterwards. Used
+// on resume to seed stream.subAgentRouter so mid-flight sub-agent events
+// (e.g. a write_file tool_result arriving after the human approves)
+// resolve to the correct parent tool_call_id from before the interrupt.
+//
+// Keyed by tool name because the router uses the sub-agent's AgentName as
+// its lookup key (which equals the tool name for NewAgentTool-wrapped
+// sub-agents like deep_research / job_search). If the same tool name is
+// called twice in one run, the later id wins — matches the router's
+// noteRootToolCall overwrite semantics.
+func rebuildOpenToolCalls(rows []model.Message) map[string]string {
+	open := map[string]string{} // tool name → tool_call_id, only kept while still un-resolved
+	for _, r := range rows {
+		if r.Role == string(schema.Assistant) && r.ToolCalls != "" {
+			var tcs []stream.ToolCallRecord
+			if err := json.Unmarshal([]byte(r.ToolCalls), &tcs); err == nil {
+				for _, tc := range tcs {
+					open[tc.Name] = tc.ID
+				}
+			}
+			continue
+		}
+		if r.Role == string(schema.Tool) && r.ToolCallID != "" {
+			// Drop any open entry whose id matches this tool_result.
+			for name, id := range open {
+				if id == r.ToolCallID {
+					delete(open, name)
+					break
+				}
+			}
+		}
+	}
+	if len(open) == 0 {
+		return nil
+	}
+	return open
 }
 
 // approvalSink wraps the pending store's sink with a side effect: whenever a
@@ -257,8 +312,9 @@ func (s *ChatService) consumeAndPersist(
 	sink stream.InterruptSink,
 	buf *stream.StreamBuffer,
 	collector *stream.RunCollector,
+	initialRouterState map[string]string,
 ) {
-	if err := stream.ConsumeADKEvents(ctx, iter, s.rootName, convID, sink, buf, collector); err != nil {
+	if err := stream.ConsumeADKEvents(ctx, iter, s.rootName, convID, sink, buf, collector, initialRouterState); err != nil {
 		log.Printf("adk runner error: %v", err)
 		if perr := s.persistRun(convID, collector, false); perr != nil {
 			log.Printf("persist run (on error path): %v", perr)
@@ -448,7 +504,7 @@ func padMissingToolResults(t stream.TurnRecord) stream.TurnRecord {
 // in the same list, the whole ToolCalls field is stripped from that message
 // and a warn is logged. Claude requires strict tool_use ↔ tool_result
 // pairing; a stray tool_use with no tool_result would 400.
-func toSchemaMessages(convID string, rows []model.Message) []*schema.Message {
+func toSchemaMessages(convID string, rows []model.Message, multimodalEnabled bool) []*schema.Message {
 	// Pass 1: collect all tool_call_ids we actually have tool_result rows for.
 	haveResult := make(map[string]struct{})
 	for _, r := range rows {
@@ -459,6 +515,20 @@ func toSchemaMessages(convID string, rows []model.Message) []*schema.Message {
 
 	out := make([]*schema.Message, 0, len(rows))
 	for _, r := range rows {
+		// User rows may carry [image: /abs/path] markers that need to be
+		// expanded into multipart image blocks for the model. Delegate to
+		// the same helper Start uses so the wire shape is identical
+		// whether a message is being sent for the first time or replayed
+		// from history.
+		if r.Role == string(schema.User) {
+			m := multimodal.BuildUserMessage(r.Content, multimodalEnabled)
+			// preserve reasoning if any (rare for user rows but harmless)
+			if r.ReasoningContent != "" {
+				m.ReasoningContent = r.ReasoningContent
+			}
+			out = append(out, m)
+			continue
+		}
 		m := &schema.Message{
 			Role:             schema.RoleType(r.Role),
 			Content:          r.Content,

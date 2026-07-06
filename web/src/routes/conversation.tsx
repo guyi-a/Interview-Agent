@@ -11,6 +11,7 @@ import { ApprovalModeDropdown } from "@/features/chat/ApprovalModeDropdown";
 import { AttachmentChips } from "@/features/chat/AttachmentChips";
 import {
   useAttachmentsStore,
+  saveImageFiles,
   serializeAttachments,
   type AttachedFile,
 } from "@/features/chat/attachments-store";
@@ -89,6 +90,17 @@ export function Conversation() {
     }
   }, [id, addAttachments]);
 
+  // Paste / drag-drop images. PromptInput has already filtered these to
+  // image/* Files; we just persist the bytes via Electron IPC and add the
+  // resulting paths to the store so they render as image chips and go out
+  // as [image:] markers on send.
+  const onImageFiles = useCallback(
+    (files: File[]) => {
+      void saveImageFiles(id, files, electronAPI.savePastedImage, addAttachments);
+    },
+    [id, addAttachments],
+  );
+
   // After the user answers an approval, the backend spins up a new run and
   // we reconnect to it via resume(). When that run drains, refresh the
   // sidebar so the "等待审批" pill drops (or stays, if another interrupt
@@ -135,6 +147,7 @@ export function Conversation() {
               topSlot={<AttachmentChips conversationID={id} />}
               leftActions={<AttachButton onClick={onPickFiles} />}
               rightActions={<ApprovalModeDropdown conversationID={id} />}
+              onImageFiles={onImageFiles}
             />
             <ApprovalBar conversationID={id} onResume={onApprovalResume} />
           </div>

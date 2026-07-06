@@ -16,6 +16,13 @@ type LLMConfig struct {
 	MaxTokens      int
 	EnableThinking bool
 	ThinkingBudget int
+	// Multimodal reports whether the main model accepts Anthropic-shape
+	// image content blocks. Off by default because most non-Claude models
+	// available on our gateway either reject or silently ignore them.
+	// When off, upstream code (multimodal.BuildUserMessage) rewrites
+	// [image:] attachment markers into [file:] so they flow through the
+	// text-based OCR reader path instead.
+	Multimodal bool
 }
 
 // ApprovalFastConfig points at an OpenAI-compatible endpoint used by the
@@ -54,6 +61,7 @@ func Load() (*Config, error) {
 			MaxTokens:      getEnvInt("ANTHROPIC_MAX_TOKENS", 8192),
 			EnableThinking: getEnvBool("ANTHROPIC_ENABLE_THINKING", true),
 			ThinkingBudget: getEnvInt("ANTHROPIC_THINKING_BUDGET", 4096),
+			Multimodal:     getEnvBool("LLM_MULTIMODAL", false),
 		},
 		ApprovalFast: ApprovalFastConfig{
 			APIKey:         os.Getenv("DEEPSEEK_API_KEY"),

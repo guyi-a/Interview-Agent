@@ -38,7 +38,7 @@ export function Sidebar() {
 
   return (
     <aside className="relative w-[280px] shrink-0 flex flex-col overflow-hidden rounded-[26px] bg-paper/92 shadow-[0_0_0_1px_var(--color-rule),0_18px_60px_oklch(0_0_0/0.08)] backdrop-blur transition-[width] duration-200 ease-out data-[collapsed=true]:w-16" data-collapsed={collapsed}>
-      <header className="shrink-0 h-2 drag-region" aria-hidden />
+      <header className="shrink-0 h-6 drag-region" aria-hidden />
 
       {collapsed ? (
         <div className="flex flex-col items-center gap-1 px-2 pt-0">

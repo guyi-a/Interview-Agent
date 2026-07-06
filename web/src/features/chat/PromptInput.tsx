@@ -2,6 +2,8 @@ import {
   useEffect,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
@@ -27,6 +29,7 @@ export function PromptInput({
   rightActions,
   topSlot,
   hasAttachments = false,
+  onImageFiles,
 }: {
   streaming: boolean;
   onSend: (text: string) => void;
@@ -44,6 +47,13 @@ export function PromptInput({
   // other content lined up (attachments, quoted text, etc.). Without this,
   // an attach-only message would be blocked by the empty-text guard.
   hasAttachments?: boolean;
+  // Called when the user pastes into the textarea or drops files onto the
+  // composer card AND at least one of them is an image (image/*). The
+  // route decides what to do — typically save the bytes to disk via the
+  // Electron IPC and drop them into the attachments store. Non-image
+  // clipboard/drop content (plain text, non-image files) is left alone so
+  // native paste/drop behaviour still works.
+  onImageFiles?: (files: File[]) => void;
 }) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -101,12 +111,55 @@ export function PromptInput({
     textareaRef.current?.focus();
   };
 
+  // Paste handler on the textarea: pull image/* items out of the clipboard
+  // and hand them to the caller. Anything else in the clipboard is left
+  // untouched so pasting plain text still works normally. We only
+  // preventDefault when we actually consume image bytes — else Chromium
+  // would drop the user's normal text paste.
+  const onPaste = (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    if (!onImageFiles) return;
+    const items = e.clipboardData?.items;
+    if (!items || items.length === 0) return;
+    const images: File[] = [];
+    for (const item of items) {
+      if (item.kind !== "file") continue;
+      if (!item.type.startsWith("image/")) continue;
+      const file = item.getAsFile();
+      if (file) images.push(file);
+    }
+    if (images.length === 0) return;
+    e.preventDefault();
+    onImageFiles(images);
+  };
+
+  // Drag-over on the composer card: signal "I'll take that" so the OS
+  // shows the drop cursor. Without preventDefault, the browser's default
+  // is to reject the drop. Cheap to always allow — the drop handler
+  // filters to image/* before doing anything.
+  const onDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!onImageFiles) return;
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const onDrop = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!onImageFiles) return;
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    e.preventDefault();
+    onImageFiles(images);
+  };
+
   return (
     <div className="px-6 pb-5 pt-3 bg-paper">
       <div className="max-w-3xl mx-auto">
         <div
           ref={cardRef}
           onMouseDown={onCardMouseDown}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
           className={cn(
             "cursor-text rounded-xl border border-rule bg-paper transition-shadow",
             "shadow-[0_1px_2px_rgba(20,30,50,0.03)]",
@@ -122,6 +175,7 @@ export function PromptInput({
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKey}
+            onPaste={onPaste}
             placeholder={streaming ? "正在响应…" : "写点什么"}
             className={cn(
               "block w-full resize-none bg-transparent px-5 pt-4 pb-2",

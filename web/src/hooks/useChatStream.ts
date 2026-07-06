@@ -484,7 +484,20 @@ export function useChatStream(
           (f) => {
             if (!f.interrupt_id) return;
             if (f.id) {
-              upsertTool(f.id, { status: "pending" });
+              // Patch only — do NOT create a new tool card. An approval
+              // that originates inside a sub-agent's tool call carries a
+              // CallID from the sub-agent's internal id space, which won't
+              // match any top-level tool_call frame; upsertTool would then
+              // spawn a phantom "(unnamed) PENDING" card at the supervisor
+              // level. The ApprovalBar still fires below because that path
+              // uses interrupt_id, not the tool id.
+              updateAssistant((t) => {
+                const idx = t.tools.findIndex((tc) => tc.id === f.id);
+                if (idx < 0) return t;
+                const tools = t.tools.slice();
+                tools[idx] = { ...tools[idx], status: "pending" };
+                return { ...t, tools };
+              });
             }
             addApprovalRef.current(conversationID, {
               interruptId: f.interrupt_id,

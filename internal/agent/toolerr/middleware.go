@@ -14,13 +14,37 @@ package toolerr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+// isInterruptErr reports whether err is a framework interrupt signal in any
+// of the wire shapes eino uses to move interrupts around:
+//
+//   - compose.interruptError / compose.subGraphInterruptError — what the
+//     compose graph runner wraps for its own reruns; ExtractInterruptInfo
+//     catches these
+//   - raw *adk.InterruptSignal (= *core.InterruptSignal) — what an
+//     adk.NewAgentTool wrapper returns when a sub-agent interrupts
+//     internally; ExtractInterruptInfo does NOT catch this, we have to
+//     unwrap with errors.As directly
+//
+// Miss any of these and this middleware treats the interrupt as a normal
+// tool failure, stringifying its checkpoint gob into the tool_result the
+// model then reads back as text. That's the "red gob dump" symptom.
+func isInterruptErr(err error) bool {
+	if _, ok := compose.ExtractInterruptInfo(err); ok {
+		return true
+	}
+	var sig *adk.InterruptSignal
+	return errors.As(err, &sig)
+}
 
 // Middleware returns a ToolMiddleware that captures errors on both the
 // invokable and streamable paths. Install it at the head of
@@ -38,7 +62,7 @@ func Middleware() compose.ToolMiddleware {
 				// itself calls tool.Interrupt) are framework control flow —
 				// pass them through untouched so eino can capture the
 				// interrupt info and emit an Interrupted event.
-				if _, ok := compose.ExtractInterruptInfo(err); ok {
+				if isInterruptErr(err) {
 					return nil, err
 				}
 				clean := stripFrameworkWrappers(err.Error())
@@ -52,7 +76,7 @@ func Middleware() compose.ToolMiddleware {
 				if err == nil {
 					return out, nil
 				}
-				if _, ok := compose.ExtractInterruptInfo(err); ok {
+				if isInterruptErr(err) {
 					return nil, err
 				}
 				clean := stripFrameworkWrappers(err.Error())

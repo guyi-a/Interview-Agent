@@ -138,10 +138,21 @@ const AGENT_TOOL_NAMES = new Set(["job_search", "deep_research"]);
 
 export function TranscriptEntry({
   turn,
+  allSubEvents,
+  ownedToolIds,
   showRule,
   streaming,
 }: {
   turn: ChatTurn;
+  // Conversation-wide subEvents pool. Provided so tool cards can pick up
+  // matching child events that were persisted into a later turn's Extra —
+  // this happens whenever a sub-agent got interrupted mid-flight and its
+  // tool_result arrived on a subsequent resume run.
+  allSubEvents: SubAgentEvent[];
+  // Union of tool_call ids across every turn — a subEvent whose parent id
+  // matches one is "adopted" by that tool no matter which turn owns the
+  // event's row; only genuinely un-parented events fall to orphan render.
+  ownedToolIds: Set<string>;
   showRule: boolean;
   streaming: boolean;
 }) {
@@ -188,7 +199,11 @@ export function TranscriptEntry({
             <ToolEntry
               key={tc.id}
               tool={tc}
-              subEvents={turn.subEvents.filter(
+              // Look up children in the conversation-wide pool: a
+              // sub-agent's tool_result can land in a later turn's
+              // subEvents (post-resume) but still belongs under this
+              // tool_call.
+              subEvents={allSubEvents.filter(
                 (e) => e.parentToolCallId === tc.id,
               )}
             />
@@ -197,11 +212,15 @@ export function TranscriptEntry({
       )}
 
       {(() => {
-        const orphans = turn.subEvents.filter(
-          (e) =>
-            !e.parentToolCallId ||
-            !turn.tools.some((t) => t.id === e.parentToolCallId),
-        );
+        // Orphan = a subEvent captured in THIS turn's Extra whose parent
+        // isn't a tool anywhere in the transcript. Cross-turn owned ones
+        // are already picked up by their tool's ToolEntry via allSubEvents,
+        // so filtering against the transcript-wide set of tool ids avoids
+        // rendering them twice.
+        const orphans = turn.subEvents.filter((e) => {
+          if (!e.parentToolCallId) return true;
+          return !ownedToolIds.has(e.parentToolCallId);
+        });
         return orphans.length > 0 ? (
           <SubAgentTimeline events={orphans} />
         ) : null;

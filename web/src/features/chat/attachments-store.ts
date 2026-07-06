@@ -1,5 +1,34 @@
 import { create } from "zustand";
-import type { PickedLocalFile } from "@/lib/electron-api";
+import { isImagePath, type PickedLocalFile } from "@/lib/electron-api";
+
+// Push the bytes of one or more freshly-produced File objects (paste,
+// drag-drop) through the Electron IPC bridge so they land on disk and can
+// flow through the exact same [image: /abs/path] pipeline as files picked
+// with the "+" button. Anything that fails to save is skipped with a log
+// warning — the user still gets whatever did succeed.
+export async function saveImageFiles(
+  convID: string,
+  files: File[],
+  savePastedImage: (
+    bytes: Uint8Array,
+    mimeType: string,
+    suggestedName?: string,
+  ) => Promise<{ path: string; name: string }>,
+  add: (convID: string, items: PickedLocalFile[]) => void,
+): Promise<void> {
+  const saved: PickedLocalFile[] = [];
+  for (const f of files) {
+    if (!f.type.startsWith("image/")) continue;
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const result = await savePastedImage(bytes, f.type, f.name || undefined);
+      saved.push({ path: result.path, name: result.name, isDirectory: false });
+    } catch (err) {
+      console.error("[attach] savePastedImage failed for", f.name, err);
+    }
+  }
+  if (saved.length > 0) add(convID, saved);
+}
 
 // One attachment in the composer. `id` is a client-generated key for React
 // list rendering and the remove-by-id call path; `path` is the actual
@@ -60,11 +89,20 @@ export const useAttachmentsStore = create<AttachmentsStore>((set, get) => ({
 
 // Marker text a message carries when it's sent with attachments. Prepended
 // to the user's typed text so the model can see exactly which local paths
-// were being referenced — the format ([file:] / [folder:]) matches
-// krow-app, and the general prompt tells the model to read these on sight.
+// were being referenced. Marker choice by kind:
+//   - directory  → [folder: /abs] — model uses list_files
+//   - image      → [image:  /abs] — backend expands into multi-part image
+//                                   content (multimodal.BuildUserMessage)
+//   - anything   → [file:   /abs] — model picks a reader tool
+// Formats match krow-app so the model prompt (general.go) can carry one
+// consistent instruction set.
 export function serializeAttachments(files: AttachedFile[]): string {
   return files
-    .map((f) => (f.isDirectory ? `[folder: ${f.path}]` : `[file: ${f.path}]`))
+    .map((f) => {
+      if (f.isDirectory) return `[folder: ${f.path}]`;
+      if (isImagePath(f.name)) return `[image: ${f.path}]`;
+      return `[file: ${f.path}]`;
+    })
     .join("\n");
 }
 
@@ -72,12 +110,12 @@ export function serializeAttachments(files: AttachedFile[]): string {
 // block. Same shape the composer chip renders, so the transcript can reuse
 // the AttachmentChip visual for read-only display.
 export interface ParsedAttachment {
-  kind: "file" | "folder";
+  kind: "file" | "folder" | "image";
   path: string;
   name: string;
 }
 
-const MARKER_RE = /^\[(file|folder):\s*(.+)\]$/;
+const MARKER_RE = /^\[(file|folder|image):\s*(.+)\]$/;
 
 // parseAttachmentMarkers pulls consecutive [file:] / [folder:] lines off
 // the top of a message and returns them plus whatever prose follows. Used
@@ -97,7 +135,7 @@ export function parseAttachmentMarkers(content: string): {
     if (!m) break;
     const path = m[2];
     const name = path.split(/[/\\]/).pop() || path;
-    attachments.push({ kind: m[1] as "file" | "folder", path, name });
+    attachments.push({ kind: m[1] as "file" | "folder" | "image", path, name });
     i++;
   }
   return {

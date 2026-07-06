@@ -4,6 +4,7 @@ import { PromptInput } from "@/features/chat/PromptInput";
 import { AttachmentChips } from "@/features/chat/AttachmentChips";
 import {
   useAttachmentsStore,
+  saveImageFiles,
   type AttachedFile,
 } from "@/features/chat/attachments-store";
 import { electronAPI } from "@/lib/electron-api";
@@ -41,8 +42,19 @@ export function Home() {
     }
   }, [draftId, addAttachments]);
 
+  // Same paste/drop pipeline as Conversation. The draftId is what the
+  // subsequent Conversation route will use as its store key, so files
+  // dropped here appear as chips on both pages.
+  const onImageFiles = useCallback(
+    (files: File[]) => {
+      void saveImageFiles(draftId, files, electronAPI.savePastedImage, addAttachments);
+    },
+    [draftId, addAttachments],
+  );
+
   return (
     <>
+      <header className="shrink-0 h-6 drag-region" aria-hidden />
       <div className="flex-1 flex items-center justify-center">
         <div className="max-w-md text-center px-8">
           <div className="font-mono text-[10px] tracking-[0.2em] uppercase text-muted mb-4">
@@ -62,6 +74,7 @@ export function Home() {
         hasAttachments={attachments.length > 0}
         topSlot={<AttachmentChips conversationID={draftId} />}
         leftActions={<AttachButton onClick={onPickFiles} />}
+        onImageFiles={onImageFiles}
       />
     </>
   );

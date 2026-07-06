@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
@@ -42,6 +44,13 @@ type InterruptSink interface {
 // Returns nil on clean stream exhaustion (caller calls FinalizeOK then),
 // or the first error encountered (caller calls FinalizeErr then).
 // Does NOT emit "done" or finalize the buffer — caller's responsibility.
+//
+// initialRouterState pre-populates the sub-agent router's open-parents map
+// (name → parent tool_call_id). Pass nil for a fresh Run; the resume path
+// hydrates this from persisted history so a sub-agent event that arrives
+// AFTER an interrupt/resume boundary still knows which supervisor-level
+// tool_call it belongs to. Without it, resume-run sub-agent events end up
+// with parentToolCallId="" and render as orphans in the transcript.
 func ConsumeADKEvents(
 	ctx context.Context,
 	iter *adk.AsyncIterator[*adk.AgentEvent],
@@ -50,8 +59,12 @@ func ConsumeADKEvents(
 	sink InterruptSink,
 	buf *StreamBuffer,
 	collector *RunCollector,
+	initialRouterState map[string]string,
 ) error {
 	router := &subAgentRouter{rootName: rootName, active: map[string]string{}}
+	for name, callID := range initialRouterState {
+		router.active[name] = callID
+	}
 
 	for {
 		// Honor ctx cancel — if the caller cancelled the run, stop draining.
@@ -68,11 +81,33 @@ func ConsumeADKEvents(
 		}
 
 		if ev.Err != nil {
+			// eino surfaces interrupts as errors on the iter when they
+			// originate deep inside a sub-agent (adk.NewAgentTool wraps
+			// them with tool.CompositeInterrupt, which bubbles up as an
+			// error rather than as Action.Interrupted). Detect the
+			// interrupt signal and route through the same approval frame
+			// path — treating it as a hard failure would spray raw gob
+			// bytes into the transcript.
+			if info, ok := compose.ExtractInterruptInfo(ev.Err); ok {
+				emitApprovalRequired(info.InterruptContexts, checkpointID, sink, buf)
+				continue
+			}
+			var sig *adk.InterruptSignal
+			if errors.As(ev.Err, &sig) {
+				emitApprovalRequired(signalToContexts(sig), checkpointID, sink, buf)
+				continue
+			}
+			// Diagnostic: if we get here on what looks like an interrupt
+			// (error string prefixed "interrupt signal:"), we need to know
+			// the concrete Go type so the check chain above can be extended.
+			// Kept behind a log rather than a panic so the run still fails
+			// loudly but predictably; delete once the wrapping is identified.
+			log.Printf("[adk_handler] unrecognised interrupt-shaped err (type=%T, str=%q)", ev.Err, ev.Err.Error())
 			return ev.Err
 		}
 
 		if ev.Action != nil && ev.Action.Interrupted != nil {
-			emitApprovalRequired(ev.Action.Interrupted, checkpointID, sink, buf)
+			emitApprovalRequired(ev.Action.Interrupted.InterruptContexts, checkpointID, sink, buf)
 			// Fall through: eino may still enqueue trailing events, but the
 			// iter's normal termination follows an interrupt.
 			continue
@@ -110,20 +145,56 @@ func ConsumeADKEvents(
 	}
 }
 
-// emitApprovalRequired turns one Interrupted event into per-context SSE
+// signalToContexts flattens a core.InterruptSignal tree into the same
+// []*adk.InterruptCtx shape adk.InterruptInfo.InterruptContexts uses.
+// Mirrors what core.ToInterruptContexts does internally: walk the tree,
+// collect signals marked IsRootCause=true (i.e. the ORIGINAL interrupt
+// site — our approval middleware inside a sub-agent), threading Parent
+// pointers so the caller can still traverse the wrapper chain.
+//
+// We need this because sub-agent-as-tool interrupts arrive as raw
+// *adk.InterruptSignal via ev.Err, and eino's public ExtractInterruptInfo
+// only recognises compose-wrapped errors, not the raw signal.
+func signalToContexts(is *adk.InterruptSignal) []*adk.InterruptCtx {
+	if is == nil {
+		return nil
+	}
+	var roots []*adk.InterruptCtx
+	var walk func(*adk.InterruptSignal, *adk.InterruptCtx)
+	walk = func(sig *adk.InterruptSignal, parent *adk.InterruptCtx) {
+		cur := &adk.InterruptCtx{
+			ID:          sig.ID,
+			Address:     sig.Address,
+			Info:        sig.InterruptInfo.Info,
+			IsRootCause: sig.InterruptInfo.IsRootCause,
+			Parent:      parent,
+		}
+		if cur.IsRootCause {
+			roots = append(roots, cur)
+		}
+		for _, sub := range sig.Subs {
+			walk(sub, cur)
+		}
+	}
+	walk(is, nil)
+	return roots
+}
+
+// emitApprovalRequired turns InterruptContexts into per-context SSE
 // frames + sink notifications. Only ApprovalInfo payloads are recognized —
 // other interrupt kinds get a generic frame with no name/args so the UI can
 // still show "an approval is pending" without crashing on unknown data.
+//
+// Callers pass the flat contexts slice directly rather than a wrapper so
+// this function serves both Action.Interrupted (top-level) and
+// compose.ExtractInterruptInfo (sub-agent bubbled-as-error) paths.
 func emitApprovalRequired(
-	info *adk.InterruptInfo,
+	contexts []*adk.InterruptCtx,
 	checkpointID string,
 	sink InterruptSink,
 	buf *StreamBuffer,
 ) {
-	if info == nil {
-		return
-	}
-	for _, ic := range info.InterruptContexts {
+	for _, ic := range contexts {
 		if ic == nil {
 			continue
 		}

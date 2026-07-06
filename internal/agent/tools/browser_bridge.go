@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -10,6 +11,16 @@ import (
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/browserbridge"
 )
+
+// maxBridgeResultBytes caps how big a single browser_bridge tool result
+// can be after JSON serialisation. Some actions (execute_script, extract,
+// read_state) can dump a whole page's DOM or a heavy JS return value into
+// the tool result, and every past tool_result is replayed verbatim on the
+// next ReAct iteration — so an uncapped 100 KiB result across 20 loop
+// steps easily crosses the model's 1 M token ceiling. 32 KiB per call
+// keeps ~30 iterations comfortably inside 1 M with room for prompt +
+// assistant messages.
+const maxBridgeResultBytes = 32 * 1024
 
 type browserBridgeInput struct {
 	Action      string `json:"action" jsonschema:"description=One of: extension_status / list_sessions / list_pages / open_tab / focus_page / close_tab / read_state / click / hover / dblclick / rightclick / type / press / scroll / wait_for / go_back / reload / extract / describe_element / execute_script"`
@@ -50,8 +61,53 @@ func newBrowserBridgeTool(svc *browserbridge.Service) (tool.BaseTool, error) {
 		"Element indices only stay valid until the DOM changes; re-read after every action. " +
 		"Do NOT close the user's tabs unless they explicitly ask — this is their real browser."
 	return utils.InferTool("browser_bridge", desc, func(ctx context.Context, in *browserBridgeInput) (*browserBridgeOutput, error) {
-		return dispatchBrowserBridge(ctx, svc, in)
+		out, err := dispatchBrowserBridge(ctx, svc, in)
+		if err != nil || out == nil || out.Data == nil {
+			return out, err
+		}
+		out.Data = capBridgeData(out.Data, in.Action)
+		return out, nil
 	})
+}
+
+// capBridgeData replaces an oversized action Data map with a truncated
+// preview stub so the LLM's context doesn't blow up on a chatty script.
+// The stub keeps enough of the original JSON prefix that a model can
+// often still extract the top-N items it cares about, and includes a
+// clear "truncated" marker so it knows to narrow its next query rather
+// than assuming the tail is missing entries.
+func capBridgeData(data map[string]interface{}, action string) map[string]interface{} {
+	b, err := json.Marshal(data)
+	if err != nil {
+		// JSON must succeed for us to have a size; if it doesn't, just pass
+		// the map through — a downstream serialization would have failed
+		// anyway and produced a clearer error.
+		return data
+	}
+	if len(b) <= maxBridgeResultBytes {
+		return data
+	}
+	// Keep a bit of headroom so the wrapping stub itself stays under the
+	// cap after the preview is appended.
+	const stubOverhead = 512
+	previewCap := maxBridgeResultBytes - stubOverhead
+	if previewCap < 0 {
+		previewCap = 0
+	}
+	preview := string(b[:previewCap])
+	return map[string]interface{}{
+		"truncated":           true,
+		"action":              action,
+		"original_size_bytes": len(b),
+		"kept_size_bytes":     len(preview),
+		"note": fmt.Sprintf(
+			"result was %d bytes, exceeded %d byte cap; showing first %d bytes of the raw JSON. "+
+				"The prefix may end mid-token. Narrow the script (paginate, select fewer fields, limit N) "+
+				"instead of retrying the same call.",
+			len(b), maxBridgeResultBytes, len(preview),
+		),
+		"preview_json": preview,
+	}
 }
 
 func dispatchBrowserBridge(ctx context.Context, svc *browserbridge.Service, in *browserBridgeInput) (*browserBridgeOutput, error) {
