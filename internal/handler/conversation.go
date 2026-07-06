@@ -28,10 +28,11 @@ func (h *ConversationHandler) Register(r *gin.Engine) {
 }
 
 type conversationListItem struct {
-	ID        string  `json:"id"`
-	ProjectID *string `json:"project_id,omitempty"`
-	Title     string  `json:"title"`
-	UpdatedAt string  `json:"updated_at"`
+	ID          string  `json:"id"`
+	ProjectID   *string `json:"project_id,omitempty"`
+	Title       string  `json:"title"`
+	AgentStatus string  `json:"agent_status,omitempty"`
+	UpdatedAt   string  `json:"updated_at"`
 }
 
 func (h *ConversationHandler) List(c *gin.Context) {
@@ -49,10 +50,11 @@ func (h *ConversationHandler) List(c *gin.Context) {
 	out := make([]conversationListItem, 0, len(items))
 	for _, it := range items {
 		out = append(out, conversationListItem{
-			ID:        it.ID,
-			ProjectID: it.ProjectID,
-			Title:     it.Title,
-			UpdatedAt: it.UpdatedAt.Format(time.RFC3339),
+			ID:          it.ID,
+			ProjectID:   it.ProjectID,
+			Title:       it.Title,
+			AgentStatus: it.AgentStatus,
+			UpdatedAt:   it.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"conversations": out})
@@ -62,7 +64,8 @@ type toolEventItem struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	ArgsJSON string `json:"args_json,omitempty"`
-	OK       bool   `json:"ok"`
+	OK       *bool  `json:"ok,omitempty"`
+	Status   string `json:"status,omitempty"`
 	Content  string `json:"content,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
@@ -131,11 +134,16 @@ func fromModelMessage(m model.Message) messageItem {
 			// duplicates.
 			if m.ToolCalls == "" {
 				for _, t := range payload.Tools {
+					status := "error"
+					if t.OK {
+						status = "ok"
+					}
 					item.Tools = append(item.Tools, toolEventItem{
 						ID:       t.ID,
 						Name:     t.Name,
 						ArgsJSON: t.ArgsJSON,
-						OK:       t.OK,
+						OK:       boolPtr(t.OK),
+						Status:   status,
 						Content:  t.Content,
 						Error:    t.Error,
 					})
@@ -214,10 +222,12 @@ func foldMessages(msgs []model.Message) []messageItem {
 			for i := range out[lastAssistantIdx].Tools {
 				t := &out[lastAssistantIdx].Tools[i]
 				if t.ID == m.ToolCallID {
-					t.OK = ok
+					t.OK = boolPtr(ok)
 					if ok {
+						t.Status = "ok"
 						t.Content = m.Content
 					} else {
+						t.Status = "error"
 						t.Error = errMsg
 						if t.Error == "" {
 							t.Error = m.Content
@@ -235,7 +245,8 @@ func foldMessages(msgs []model.Message) []messageItem {
 				out[lastAssistantIdx].Tools = append(out[lastAssistantIdx].Tools, toolEventItem{
 					ID:      m.ToolCallID,
 					Name:    m.ToolName,
-					OK:      ok,
+					OK:      boolPtr(ok),
+					Status:  statusFromOK(ok),
 					Content: m.Content,
 					Error:   errMsg,
 				})
@@ -256,8 +267,10 @@ func foldMessages(msgs []model.Message) []messageItem {
 							ID:       rec.ID,
 							Name:     rec.Name,
 							ArgsJSON: rec.ArgsJSON,
-							// OK/Content/Error left zero — filled when the
-							// matching tool rows fold in below.
+							Status:   "pending",
+							// OK/Content/Error left empty — filled when the
+							// matching tool rows fold in below. Until then this
+							// represents an approval-pending tool call.
 						})
 					}
 					item.Tools = placeholders
@@ -321,4 +334,15 @@ func joinAssistantContent(a, b string) string {
 		return a
 	}
 	return a + "\n\n" + b
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func statusFromOK(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "error"
 }

@@ -60,6 +60,15 @@ func (r *ConversationRepo) SetProjectID(ctx context.Context, conversationID, pro
 		Update("project_id", projectID).Error
 }
 
+// SetAgentStatus flips the conversation's runtime state (idle / running /
+// waiting_approval). Called by ChatService at run start, on interrupt, and
+// on finalize so the sidebar can reflect activity without polling.
+func (r *ConversationRepo) SetAgentStatus(ctx context.Context, id, status string) error {
+	return r.db.WithContext(ctx).Model(&model.Conversation{}).
+		Where("id = ?", id).
+		Update("agent_status", status).Error
+}
+
 // ListByProject returns all conversations belonging to a project.
 func (r *ConversationRepo) ListByProject(ctx context.Context, projectID string) ([]model.Conversation, error) {
 	var out []model.Conversation

@@ -18,8 +18,29 @@ type LLMConfig struct {
 	ThinkingBudget int
 }
 
+// ApprovalFastConfig points at an OpenAI-compatible endpoint used by the
+// auto-mode approval classifier. Kept independent of LLMConfig because the
+// main model runs on the Anthropic protocol while the classifier here uses
+// the OpenAI chat/completions shape (DeepSeek by default). Missing APIKey
+// disables the classifier entirely — auto mode then only has the fast-path
+// rules to work with, and everything else falls through to human review.
+type ApprovalFastConfig struct {
+	APIKey    string
+	BaseURL   string
+	Model     string
+	MaxTokens int
+	// TimeoutSeconds bounds a single classifier call. Anything over this
+	// deadline is treated as failure → deny → human review (safe default).
+	TimeoutSeconds int
+}
+
+func (c ApprovalFastConfig) Enabled() bool {
+	return c.APIKey != "" && c.BaseURL != "" && c.Model != ""
+}
+
 type Config struct {
-	LLM LLMConfig
+	LLM          LLMConfig
+	ApprovalFast ApprovalFastConfig
 }
 
 func Load() (*Config, error) {
@@ -33,6 +54,13 @@ func Load() (*Config, error) {
 			MaxTokens:      getEnvInt("ANTHROPIC_MAX_TOKENS", 8192),
 			EnableThinking: getEnvBool("ANTHROPIC_ENABLE_THINKING", true),
 			ThinkingBudget: getEnvInt("ANTHROPIC_THINKING_BUDGET", 4096),
+		},
+		ApprovalFast: ApprovalFastConfig{
+			APIKey:         os.Getenv("DEEPSEEK_API_KEY"),
+			BaseURL:        getEnv("APPROVAL_FAST_BASE_URL", "https://api.deepseek.com"),
+			Model:          getEnv("APPROVAL_FAST_MODEL", "deepseek-chat"),
+			MaxTokens:      getEnvInt("APPROVAL_FAST_MAX_TOKENS", 512),
+			TimeoutSeconds: getEnvInt("APPROVAL_FAST_TIMEOUT", 15),
 		},
 	}
 

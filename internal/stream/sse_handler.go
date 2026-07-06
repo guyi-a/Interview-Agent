@@ -50,10 +50,30 @@ type Frame struct {
 	ProjectName   string `json:"project_name,omitempty"`
 	WorkspacePath string `json:"workspace_path,omitempty"`
 
+	// approval_required frame — the tool_call above needs human approval
+	// before eino resumes it. The frontend keys off (CheckpointID + InterruptID)
+	// when POSTing the user's decision.
+	CheckpointID string `json:"checkpoint_id,omitempty"`
+	InterruptID  string `json:"interrupt_id,omitempty"`
+
 	// Usage
 	Prompt int `json:"prompt,omitempty"`
 	Reply  int `json:"completion,omitempty"`
 	Total  int `json:"total,omitempty"`
+}
+
+// ApprovalInfo is what an approval middleware attaches to tool.Interrupt so
+// downstream (adk_handler → SSE) can render an approval card. Living in the
+// stream package keeps the type import graph one-way: approval imports stream,
+// stream stays leaf-level.
+type ApprovalInfo struct {
+	// Tool is the tool name being called.
+	Tool string
+	// Args is the raw JSON arguments string as the model produced them.
+	Args string
+	// CallID is the eino tool call id (tc-N), so the UI can pin the
+	// approval card visually next to the tool_call frame that spawned it.
+	CallID string
 }
 
 // ToolCallRecord captures the shape of a single tool_call decided by an

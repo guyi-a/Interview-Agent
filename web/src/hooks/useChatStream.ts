@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelChat,
+  listPendingApprovals,
   listMessages,
   postChat,
   resumeChat,
   type PersistedMessage,
 } from "@/lib/api";
 import { useWorkspaceStore } from "@/features/workspace/store";
+import { useApprovalStore } from "@/features/chat/approval-store";
 
 export type ToolCall = {
   id: string;
   name: string;
   argsJson: string;
-  status: "running" | "ok" | "error";
+  status: "pending" | "running" | "ok" | "error" | "cancelled";
   content?: string;
   error?: string;
 };
@@ -54,6 +56,7 @@ type Frame = {
     | "tool_result"
     | "project_bound"
     | "usage"
+    | "approval_required"
     | "done"
     | "error";
   // Routing
@@ -72,6 +75,9 @@ type Frame = {
   project_id?: string;
   project_name?: string;
   workspace_path?: string;
+  // approval_required — links the paused tool call to the resume endpoint
+  checkpoint_id?: string;
+  interrupt_id?: string;
 };
 
 const WORKSPACE_TOOL_NAMES = new Set([
@@ -126,6 +132,30 @@ function parseFrames(buffer: string): { frames: Frame[]; rest: string } {
   return { frames, rest };
 }
 
+function isCancelledToolResult(content?: string, error?: string): boolean {
+  const value = `${content ?? ""}\n${error ?? ""}`.toLowerCase();
+  return (
+    value.includes("用户拒绝执行") ||
+    value.includes("[canceled]") ||
+    value.includes("[cancelled]") ||
+    value.includes("canceled") ||
+    value.includes("cancelled")
+  );
+}
+
+function normalizeToolStatus(
+  status: "pending" | "running" | "ok" | "error" | "cancelled" | undefined,
+  ok: boolean | undefined,
+  content?: string,
+  error?: string,
+): ToolCall["status"] {
+  if (status === "cancelled" || isCancelledToolResult(content, error)) {
+    return "cancelled";
+  }
+  if (status) return status;
+  return ok ? "ok" : "error";
+}
+
 function fromPersisted(rows: PersistedMessage[]): ChatTurn[] {
   return rows
     .filter((r) => r.role === "user" || r.role === "assistant")
@@ -138,7 +168,7 @@ function fromPersisted(rows: PersistedMessage[]): ChatTurn[] {
         id: t.id,
         name: t.name,
         argsJson: t.args_json ?? "",
-        status: t.ok ? ("ok" as const) : ("error" as const),
+        status: normalizeToolStatus(t.status, t.ok, t.content, t.error),
         content: t.content,
         error: t.error,
       })),
@@ -179,6 +209,7 @@ async function runSSELoop(
   ) => void,
   onProjectBound: ((e: ProjectBoundEvent) => void) | undefined,
   onWorkspaceChanged: (() => void) | undefined,
+  onApprovalRequired: ((frame: Frame) => void) | undefined,
   onError: (msg: string) => void,
 ) {
   if (!res.ok || !res.body) {
@@ -274,13 +305,21 @@ async function runSSELoop(
           break;
         case "tool_result":
           if (f.id) {
+            const status = normalizeToolStatus(
+              undefined,
+              f.ok,
+              f.content,
+              f.error ?? f.message,
+            );
             upsertTool(f.id, {
               name: f.name ?? undefined,
-              status: f.ok ? "ok" : "error",
+              status,
               content: f.ok ? f.content : undefined,
               error: f.ok ? undefined : f.error ?? f.message,
             });
-            if (f.ok && mayAffectWorkspace(f.name)) onWorkspaceChanged?.();
+            if (status === "ok" && mayAffectWorkspace(f.name)) {
+              onWorkspaceChanged?.();
+            }
           }
           break;
         case "project_bound":
@@ -290,6 +329,11 @@ async function runSSELoop(
               projectName: f.project_name ?? "",
               workspacePath: f.workspace_path ?? "",
             });
+          }
+          break;
+        case "approval_required":
+          if (f.interrupt_id) {
+            onApprovalRequired?.(f);
           }
           break;
         case "usage":
@@ -332,6 +376,14 @@ export function useChatStream(
   refreshWorkspaceFilesRef.current = refreshWorkspaceFiles;
   const projectIdRef = useRef(opts?.projectId);
   projectIdRef.current = opts?.projectId;
+  const addApproval = useApprovalStore((s) => s.add);
+  const clearApprovals = useApprovalStore((s) => s.clear);
+  const addApprovalRef = useRef(addApproval);
+  const clearApprovalsRef = useRef(clearApprovals);
+  addApprovalRef.current = addApproval;
+  clearApprovalsRef.current = clearApprovals;
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
 
   // Drives a Response into the assistant turn with the given id. Owns the
   // streaming flag, abort-ref bookkeeping, and AbortError/error -> turn-state
@@ -429,6 +481,18 @@ export function useChatStream(
           appendSubEvent,
           onProjectBoundRef.current,
           refreshWorkspaceFilesRef.current,
+          (f) => {
+            if (!f.interrupt_id) return;
+            if (f.id) {
+              upsertTool(f.id, { status: "pending" });
+            }
+            addApprovalRef.current(conversationID, {
+              interruptId: f.interrupt_id,
+              callId: f.id ?? "",
+              tool: f.name ?? "",
+              argsJson: f.args_json ?? "",
+            });
+          },
           setError,
         );
       } catch (err) {
@@ -446,7 +510,7 @@ export function useChatStream(
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [],
+    [conversationID],
   );
 
   useEffect(() => {
@@ -470,6 +534,24 @@ export function useChatStream(
       }
       if (cancelled) return;
       setTurns(fromPersisted(rows));
+
+      try {
+        const approvals = await listPendingApprovals(conversationID);
+        if (cancelled) return;
+        clearApprovalsRef.current(conversationID);
+        for (const item of approvals) {
+          if (!item.interrupt_id) continue;
+          addApprovalRef.current(conversationID, {
+            interruptId: item.interrupt_id,
+            callId: item.call_id ?? "",
+            tool: item.tool ?? "",
+            argsJson: item.args_json ?? "",
+          });
+        }
+      } catch (err) {
+        if (!cancelled) console.error("[approval] load pending failed:", err);
+      }
+
       setLoading(false);
 
       // Always probe for an in-flight stream — backend returns 204 when there
@@ -583,5 +665,58 @@ export function useChatStream(
     await cancelChat(conversationID);
   }, [conversationID]);
 
-  return { turns, loading, streaming, error, send, cancel };
+  // Reconnect to a freshly created SSE stream — used after an approval
+  // decision, where the backend has spun up a new run into a new buffer
+  // and the previous SSE connection has already closed. Continuation events
+  // belong to the SAME assistant turn that was mid-flight when the interrupt
+  // fired: reusing its id lets tool_result frames find the matching tool_call
+  // entry (which was left in the "running" state pre-interrupt) and flip it
+  // to done, instead of orphaning both.
+  const resume = useCallback(async () => {
+    if (streaming) return;
+    const controller = new AbortController();
+    let res: Response | null;
+    try {
+      res = await resumeChat(conversationID, controller.signal);
+    } catch (err) {
+      if ((err as { name?: string }).name === "AbortError") return;
+      console.error("[chat] resume after approval failed:", err);
+      return;
+    }
+    if (!res) return;
+
+    const lastAssistant = [...turnsRef.current]
+      .reverse()
+      .find((t) => t.role === "assistant");
+
+    let targetId: string;
+    if (lastAssistant) {
+      targetId = lastAssistant.id;
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.id === targetId ? { ...t, done: false, error: undefined } : t,
+        ),
+      );
+    } else {
+      const nowIso = new Date().toISOString();
+      const assistantTurn: ChatTurn = {
+        id: `a-resume-${nowIso}`,
+        role: "assistant",
+        content: "",
+        reasoning: "",
+        tools: [],
+        subEvents: [],
+        createdAt: nowIso,
+        done: false,
+      };
+      targetId = assistantTurn.id;
+      setTurns((prev) => [...prev, assistantTurn]);
+    }
+
+    setStreaming(true);
+    abortRef.current = controller;
+    await runStreamingResponse(res, targetId, controller);
+  }, [conversationID, streaming, runStreamingResponse]);
+
+  return { turns, loading, streaming, error, send, cancel, resume };
 }

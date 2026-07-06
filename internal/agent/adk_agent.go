@@ -10,9 +10,12 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 
+	"github.com/guyi-a/Interview-Agent/internal/agent/checkpoint"
 	"github.com/guyi-a/Interview-Agent/internal/agent/prompts"
 	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
+	"github.com/guyi-a/Interview-Agent/internal/approval"
+	"github.com/guyi-a/Interview-Agent/internal/repository"
 )
 
 // 这两个 agent name 是稳定标识：
@@ -48,6 +51,9 @@ func NewInterviewADKAgent(
 	cm model.ToolCallingChatModel,
 	baseTools []tool.BaseTool,
 	skillLoader *skills.Loader,
+	checkpointRepo *repository.CheckpointRepo,
+	approvalModes *approval.ModeStore,
+	classifier *approval.Classifier,
 ) (*ADKBundle, error) {
 	if cm == nil {
 		return nil, fmt.Errorf("ToolCallingChatModel is nil")
@@ -70,9 +76,13 @@ func NewInterviewADKAgent(
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
 				Tools: baseTools,
-				// Without this, a tool error fatals the whole AgentEvent stream
-				// — model never sees the error and can't recover.
-				ToolCallMiddlewares: []compose.ToolMiddleware{toolerr.Middleware()},
+				// approval MUST come before toolerr — toolerr also passes
+				// interrupt errors through, but the correct order avoids
+				// relying on that safety net.
+				ToolCallMiddlewares: []compose.ToolMiddleware{
+					approval.Middleware(approvalModes, classifier),
+					toolerr.Middleware(),
+				},
 			},
 		},
 	})
@@ -92,8 +102,11 @@ func NewInterviewADKAgent(
 		Model:       cm,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools:               baseTools,
-				ToolCallMiddlewares: []compose.ToolMiddleware{toolerr.Middleware()},
+				Tools: baseTools,
+				ToolCallMiddlewares: []compose.ToolMiddleware{
+					approval.Middleware(approvalModes, classifier),
+					toolerr.Middleware(),
+				},
 			},
 		},
 		MaxIterations: 50,
@@ -115,8 +128,11 @@ func NewInterviewADKAgent(
 		Model:       cm,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools:               supervisorTools,
-				ToolCallMiddlewares: []compose.ToolMiddleware{toolerr.Middleware()},
+				Tools: supervisorTools,
+				ToolCallMiddlewares: []compose.ToolMiddleware{
+					approval.Middleware(approvalModes, classifier),
+					toolerr.Middleware(),
+				},
 			},
 			// Bubble up sub-agent (deep_research) internal events to the
 			// Runner's iter so the UI can show real-time progress.
@@ -131,6 +147,7 @@ func NewInterviewADKAgent(
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           supervisor,
 		EnableStreaming: true,
+		CheckPointStore: checkpoint.NewDBStore(checkpointRepo),
 	})
 
 	return &ADKBundle{

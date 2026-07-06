@@ -42,11 +42,19 @@ export function ConversationItem({
           <div className="flex-1 min-w-0">
             <div
               className={cn(
-                "truncate leading-5",
+                "truncate leading-5 flex items-center gap-1.5",
                 indent ? "text-xs" : "text-[13px]",
               )}
             >
-              {item.title || "（未命名）"}
+              <span className="truncate">{item.title || "（未命名）"}</span>
+              {item.agent_status === "waiting_approval" && (
+                <span
+                  className="shrink-0 rounded border border-rule bg-paper px-1.5 py-0.5 text-[10px] font-medium text-ink shadow-[0_1px_1px_rgba(20,30,50,0.04)]"
+                  title="等待审批"
+                >
+                  等待审批
+                </span>
+              )}
             </div>
             {!indent && (
               <div className="font-mono text-[10px] tracking-wider uppercase text-muted/75 mt-0.5">

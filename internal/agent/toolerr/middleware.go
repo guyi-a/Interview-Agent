@@ -34,6 +34,13 @@ func Middleware() compose.ToolMiddleware {
 				if err == nil {
 					return out, nil
 				}
+				// Interrupt signals (from approval middleware or a tool that
+				// itself calls tool.Interrupt) are framework control flow —
+				// pass them through untouched so eino can capture the
+				// interrupt info and emit an Interrupted event.
+				if _, ok := compose.ExtractInterruptInfo(err); ok {
+					return nil, err
+				}
 				clean := stripFrameworkWrappers(err.Error())
 				FromContext(ctx).Record(input.CallID, clean)
 				return &compose.ToolOutput{Result: formatToolErrMsg(input.Name, clean)}, nil
@@ -44,6 +51,9 @@ func Middleware() compose.ToolMiddleware {
 				out, err := next(ctx, input)
 				if err == nil {
 					return out, nil
+				}
+				if _, ok := compose.ExtractInterruptInfo(err); ok {
+					return nil, err
 				}
 				clean := stripFrameworkWrappers(err.Error())
 				FromContext(ctx).Record(input.CallID, clean)

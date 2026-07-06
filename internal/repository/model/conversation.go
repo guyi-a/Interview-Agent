@@ -3,13 +3,14 @@ package model
 import "time"
 
 type Conversation struct {
-	ID        string  `gorm:"primaryKey;type:varchar(64)"`
-	ProjectID *string `gorm:"type:varchar(64);index"` // nil = ad-hoc, non-nil = project-bound
-	Title     string  `gorm:"type:varchar(255)"`
-	Status    string  `gorm:"type:varchar(20);default:'active';index"`
-	Pinned    bool    `gorm:"default:false"`
-	CreatedAt time.Time
-	UpdatedAt time.Time `gorm:"index"`
+	ID          string  `gorm:"primaryKey;type:varchar(64)"`
+	ProjectID   *string `gorm:"type:varchar(64);index"` // nil = ad-hoc, non-nil = project-bound
+	Title       string  `gorm:"type:varchar(255)"`
+	Status      string  `gorm:"type:varchar(20);default:'active';index"`
+	AgentStatus string  `gorm:"type:varchar(20);default:'idle';index"` // idle / running / waiting_approval
+	Pinned      bool    `gorm:"default:false"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time `gorm:"index"`
 }
 
 func (Conversation) TableName() string {

@@ -4,6 +4,7 @@ export type ConversationItem = {
   id: string;
   project_id?: string | null;
   title: string;
+  agent_status?: string; // "idle" | "running" | "waiting_approval"
   updated_at: string;
 };
 
@@ -18,7 +19,8 @@ export type PersistedToolEvent = {
   id: string;
   name: string;
   args_json?: string;
-  ok: boolean;
+  ok?: boolean;
+  status?: "pending" | "running" | "ok" | "error" | "cancelled";
   content?: string;
   error?: string;
 };
@@ -149,6 +151,80 @@ export async function cancelChat(id: string): Promise<void> {
   await fetch(`${API_BASE}/chat/${encodeURIComponent(id)}/cancel`, {
     method: "POST",
   }).catch(() => {});
+}
+
+// postApproval sends the user's approve/deny for one paused tool call.
+// The backend fires runner.ResumeWithParams; the continuation streams over
+// the existing SSE connection, so this call only needs to resolve/reject.
+// 404 is treated as "already handled" — the caller can drop the pending
+// card without surfacing an error.
+export async function postApproval(
+  conversationID: string,
+  interruptID: string,
+  decision: "approve" | "deny",
+  reason?: string,
+): Promise<{ handled: boolean }> {
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(conversationID)}/approvals/${encodeURIComponent(interruptID)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, reason }),
+    },
+  );
+  if (res.status === 404) return { handled: false };
+  if (!res.ok) throw new Error(`approval ${res.status}`);
+  return { handled: true };
+}
+
+export type PendingApprovalItem = {
+  interrupt_id: string;
+  call_id?: string;
+  tool?: string;
+  args_json?: string;
+};
+
+export async function listPendingApprovals(
+  conversationID: string,
+): Promise<PendingApprovalItem[]> {
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(conversationID)}/approvals/pending`,
+  );
+  if (!res.ok) throw new Error(`listPendingApprovals: ${res.status}`);
+  const data = (await res.json()) as { approvals?: PendingApprovalItem[] };
+  return data.approvals ?? [];
+}
+
+// The set of per-conversation approval modes. Kept in sync with backend
+// approval.Mode — extending here without extending backend will 400 on POST.
+export type ApprovalMode = "default" | "auto" | "full_access";
+
+export async function getApprovalMode(
+  conversationID: string,
+): Promise<ApprovalMode> {
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(conversationID)}/approval-mode`,
+  );
+  if (!res.ok) throw new Error(`getApprovalMode: ${res.status}`);
+  const data = (await res.json()) as { mode?: string };
+  return (data.mode as ApprovalMode) ?? "default";
+}
+
+export async function setApprovalMode(
+  conversationID: string,
+  mode: ApprovalMode,
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(conversationID)}/approval-mode`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    },
+  );
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`setApprovalMode: ${res.status}`);
+  }
 }
 
 export type WorkspaceTreeEntry = {

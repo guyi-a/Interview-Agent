@@ -1,0 +1,194 @@
+package approval
+
+import (
+	"context"
+	"log"
+	"sync"
+
+	"github.com/guyi-a/Interview-Agent/internal/repository"
+	"github.com/guyi-a/Interview-Agent/internal/repository/model"
+	"github.com/guyi-a/Interview-Agent/internal/stream"
+)
+
+// Pending item — one paused tool call awaiting the user's decision. Keyed
+// externally by conversation id so the HTTP layer can look up the target
+// without knowing checkpoint internals.
+type PendingItem struct {
+	// CheckpointID is the eino Runner checkpoint id (== conversation id in
+	// our setup), passed to Runner.ResumeWithParams on approval.
+	CheckpointID string
+	// InterruptID is InterruptCtx.ID — the address eino uses to route the
+	// resume decision to the exact middleware invocation that paused.
+	InterruptID string
+	// CallID lets the frontend align the approval card with its tool_call
+	// frame in the timeline.
+	CallID string
+	// Tool + Args are for display only.
+	Tool string
+	Args string
+}
+
+// PendingStore keeps in-flight approvals per conversation. In-memory index
+// backed by a SQLite pending_approvals table so a server restart doesn't
+// strand a conversation mid-approval: on boot the service calls Restore to
+// hydrate the in-memory list from the DB.
+//
+// Scope: this type owns the pending list + its own DB rows only. It does NOT
+// touch conversation.agent_status — that's ChatService's job, driven by
+// HasPending in finalizeStatus.
+type PendingStore struct {
+	mu    sync.Mutex
+	items map[string][]*PendingItem // convID -> ordered list
+	repo  *repository.PendingApprovalRepo
+}
+
+func NewPendingStore(repo *repository.PendingApprovalRepo) *PendingStore {
+	return &PendingStore{
+		items: make(map[string][]*PendingItem),
+		repo:  repo,
+	}
+}
+
+// Record is called by the stream layer when an Interrupted event arrives.
+// info is the *stream.ApprovalInfo the middleware attached; other types are
+// stashed with empty display fields.
+//
+// DB write failures are logged with enough context to locate the row but do
+// not abort the in-memory append — the user still needs the ApprovalBar to
+// show on this live connection. Losing the row only costs recoverability on
+// the next restart, which matches pre-persistence behaviour.
+func (s *PendingStore) Record(convID string) stream.InterruptSink {
+	return sinkFunc(func(checkpointID, interruptID string, info any) {
+		item := &PendingItem{
+			CheckpointID: checkpointID,
+			InterruptID:  interruptID,
+		}
+		if a, ok := info.(*stream.ApprovalInfo); ok && a != nil {
+			item.Tool = a.Tool
+			item.Args = a.Args
+			item.CallID = a.CallID
+		}
+		s.mu.Lock()
+		s.items[convID] = append(s.items[convID], item)
+		s.mu.Unlock()
+
+		if s.repo != nil {
+			row := &model.PendingApproval{
+				ConversationID: convID,
+				InterruptID:    interruptID,
+				CallID:         item.CallID,
+				Tool:           item.Tool,
+				Args:           item.Args,
+			}
+			if err := s.repo.Insert(context.Background(), row); err != nil {
+				log.Printf("pending_approvals insert failed (conv=%s interrupt=%s tool=%s): %v",
+					convID, interruptID, item.Tool, err)
+			}
+		}
+	})
+}
+
+// Take pops the pending item matching interruptID from convID's queue, or
+// (nil, false) if not found. Only the matched item is removed; siblings stay.
+//
+// DB delete runs unconditionally — even when the in-memory lookup misses.
+// That self-heals stale rows left over from a crash between "checkpoint
+// resumed" and "in-memory pop": the stale row is dropped on the first
+// user click, so it can't keep re-appearing on future restarts.
+func (s *PendingStore) Take(convID, interruptID string) (*PendingItem, bool) {
+	s.mu.Lock()
+	list := s.items[convID]
+	var found *PendingItem
+	for i, it := range list {
+		if it.InterruptID == interruptID {
+			s.items[convID] = append(list[:i], list[i+1:]...)
+			if len(s.items[convID]) == 0 {
+				delete(s.items, convID)
+			}
+			found = it
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if s.repo != nil {
+		if err := s.repo.DeleteByInterruptID(context.Background(), convID, interruptID); err != nil {
+			log.Printf("pending_approvals delete failed (conv=%s interrupt=%s): %v",
+				convID, interruptID, err)
+		}
+	}
+
+	if found == nil {
+		return nil, false
+	}
+	return found, true
+}
+
+// HasPending reports whether the conversation has anything awaiting approval.
+// The service uses this to decide the conversation's agent_status.
+func (s *PendingStore) HasPending(convID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.items[convID]) > 0
+}
+
+// List returns a snapshot of pending approvals for a conversation in arrival
+// order. The returned items are copies so callers cannot mutate store state.
+func (s *PendingStore) List(convID string) []PendingItem {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.items[convID]
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]PendingItem, 0, len(list))
+	for _, it := range list {
+		if it == nil {
+			continue
+		}
+		out = append(out, *it)
+	}
+	return out
+}
+
+// Clear drops every pending item for a conversation. Called on hard cancel
+// or when a new run starts (which overwrites the checkpoint anyway).
+func (s *PendingStore) Clear(convID string) {
+	s.mu.Lock()
+	delete(s.items, convID)
+	s.mu.Unlock()
+
+	if s.repo != nil {
+		if err := s.repo.DeleteByConversationID(context.Background(), convID); err != nil {
+			log.Printf("pending_approvals clear failed (conv=%s): %v", convID, err)
+		}
+	}
+}
+
+// Restore hydrates the in-memory store from persisted rows at startup. Rows
+// are expected to arrive in arrival order (ORDER BY created_at ASC) so
+// multi-pending conversations replay in the same sequence users saw before
+// the crash. This does NOT re-write the rows back to the DB.
+func (s *PendingStore) Restore(rows []model.PendingApproval) {
+	if len(rows) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range rows {
+		item := &PendingItem{
+			CheckpointID: r.ConversationID,
+			InterruptID:  r.InterruptID,
+			CallID:       r.CallID,
+			Tool:         r.Tool,
+			Args:         r.Args,
+		}
+		s.items[r.ConversationID] = append(s.items[r.ConversationID], item)
+	}
+}
+
+type sinkFunc func(checkpointID, interruptID string, info any)
+
+func (f sinkFunc) Record(checkpointID, interruptID string, info any) {
+	f(checkpointID, interruptID, info)
+}

@@ -11,21 +11,33 @@ import (
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
 )
 
+// InterruptSink is called every time an ADK agent event carries a HITL
+// interrupt (typically an approval request). The service layer implements it
+// so it can remember the (checkpointID, interruptID, info) tuple and later
+// call runner.ResumeWithParams with the user's decision.
+type InterruptSink interface {
+	Record(checkpointID, interruptID string, info any)
+}
+
 // ConsumeADKEvents drives an ADK Runner's AsyncIterator, translating every
 // AgentEvent into SSE frames written to buf, and accumulating data into
 // collector for later persistence.
 //
 // Routing rules (matching docs/adk-api-notes.md §8):
 //   - ev.Err != nil                      → "error" frame, return that error
+//   - ev.Action.Interrupted != nil       → one "approval_required" frame per
+//     InterruptContext, sink.Record for
+//     each, then keep draining (interrupt
+//     ends the iter naturally after)
 //   - ev.AgentName == rootName           → root path:
-//       streaming/Assistant → per-chunk "thinking"/"text"; concat → "tool_call"
-//       Tool                → "tool_result"
-//       (writes to collector.content / reasoning / tools)
+//     streaming/Assistant → per-chunk "thinking"/"text"; concat → "tool_call"
+//     Tool                → "tool_result"
+//     (writes to collector.content / reasoning / tools)
 //   - ev.AgentName != rootName           → sub-agent path:
-//       same shape of SSE frames, but each frame.agent = ev.AgentName,
-//       writes go to collector.subEvents instead so the persisted root
-//       message content stays clean. Sub-agent tool events are linked to
-//       the root tool_call that triggered them via parent_tool_call_id.
+//     same shape of SSE frames, but each frame.agent = ev.AgentName,
+//     writes go to collector.subEvents instead so the persisted root
+//     message content stays clean. Sub-agent tool events are linked to
+//     the root tool_call that triggered them via parent_tool_call_id.
 //
 // Returns nil on clean stream exhaustion (caller calls FinalizeOK then),
 // or the first error encountered (caller calls FinalizeErr then).
@@ -34,6 +46,8 @@ func ConsumeADKEvents(
 	ctx context.Context,
 	iter *adk.AsyncIterator[*adk.AgentEvent],
 	rootName string,
+	checkpointID string,
+	sink InterruptSink,
 	buf *StreamBuffer,
 	collector *RunCollector,
 ) error {
@@ -57,9 +71,15 @@ func ConsumeADKEvents(
 			return ev.Err
 		}
 
+		if ev.Action != nil && ev.Action.Interrupted != nil {
+			emitApprovalRequired(ev.Action.Interrupted, checkpointID, sink, buf)
+			// Fall through: eino may still enqueue trailing events, but the
+			// iter's normal termination follows an interrupt.
+			continue
+		}
+
 		if ev.Output == nil || ev.Output.MessageOutput == nil {
-			// Action-only event (Exit / Interrupted / TransferToAgent). First
-			// phase ignores these — none should fire in our config.
+			// Action-only event (Exit / TransferToAgent) we don't render.
 			continue
 		}
 
@@ -86,6 +106,40 @@ func ConsumeADKEvents(
 				continue
 			}
 			emitNonStreamAssistant(isRoot, ev.AgentName, router, mv.Message, buf, collector)
+		}
+	}
+}
+
+// emitApprovalRequired turns one Interrupted event into per-context SSE
+// frames + sink notifications. Only ApprovalInfo payloads are recognized —
+// other interrupt kinds get a generic frame with no name/args so the UI can
+// still show "an approval is pending" without crashing on unknown data.
+func emitApprovalRequired(
+	info *adk.InterruptInfo,
+	checkpointID string,
+	sink InterruptSink,
+	buf *StreamBuffer,
+) {
+	if info == nil {
+		return
+	}
+	for _, ic := range info.InterruptContexts {
+		if ic == nil {
+			continue
+		}
+		frame := Frame{
+			Type:         "approval_required",
+			CheckpointID: checkpointID,
+			InterruptID:  ic.ID,
+		}
+		if req, ok := ic.Info.(*ApprovalInfo); ok && req != nil {
+			frame.ID = req.CallID
+			frame.Name = req.Tool
+			frame.ArgsJSON = req.Args
+		}
+		buf.Append(Encode(frame))
+		if sink != nil {
+			sink.Record(checkpointID, ic.ID, ic.Info)
 		}
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/guyi-a/Interview-Agent/internal/agent/llm"
 	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/agent/tools"
+	"github.com/guyi-a/Interview-Agent/internal/approval"
 	"github.com/guyi-a/Interview-Agent/internal/config"
 	"github.com/guyi-a/Interview-Agent/internal/handler"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
@@ -66,6 +67,15 @@ func main() {
 	convRepo := repository.NewConversationRepo(db)
 	msgRepo := repository.NewMessageRepo(db)
 	projectRepo := repository.NewProjectRepo(db)
+	checkpointRepo := repository.NewCheckpointRepo(db)
+	pendingApprovalRepo := repository.NewPendingApprovalRepo(db)
+	approvalModes := approval.NewModeStore()
+	classifier := approval.NewClassifier(cfg.ApprovalFast)
+	if classifier == nil {
+		log.Printf("approval classifier disabled (missing DEEPSEEK_API_KEY or fast-model config); auto mode falls back to fast-path rules only")
+	} else {
+		log.Printf("approval classifier enabled: model=%s timeout=%ds", cfg.ApprovalFast.Model, cfg.ApprovalFast.TimeoutSeconds)
+	}
 
 	absWorkspaceRoot, err := filepath.Abs(workspaceRoot)
 	if err != nil {
@@ -105,18 +115,26 @@ func main() {
 		log.Fatalf("tools.Builtin: %v", err)
 	}
 
-	ag, err := agent.NewInterviewADKAgent(ctx, cm, ts, skillLoader)
+	ag, err := agent.NewInterviewADKAgent(ctx, cm, ts, skillLoader, checkpointRepo, approvalModes, classifier)
 	if err != nil {
 		log.Fatalf("agent.NewInterviewADKAgent: %v", err)
 	}
 
 	manager := stream.NewManager()
-	chatService := service.NewChatService(ag.Runner, ag.RootName, manager, convRepo, msgRepo, projectRepo)
+	pendingApprovals := approval.NewPendingStore(pendingApprovalRepo)
+	if rows, err := pendingApprovalRepo.ListAll(ctx); err != nil {
+		log.Printf("restore pending approvals: %v", err)
+	} else {
+		pendingApprovals.Restore(rows)
+		log.Printf("restored %d pending approval(s) from DB", len(rows))
+	}
+	chatService := service.NewChatService(ag.Runner, ag.RootName, manager, convRepo, msgRepo, projectRepo, pendingApprovals, approvalModes)
 	convService := service.NewConversationService(convRepo, msgRepo, manager, browserMgr)
 	projectService := service.NewProjectService(projectRepo, convRepo, manager, browserMgr, absWorkspaceRoot)
 	workspaceService := service.NewWorkspaceService(convRepo, projectRepo)
 
 	chatHandler := handler.NewChatHandler(chatService)
+	approvalHandler := handler.NewApprovalHandler(chatService)
 	convHandler := handler.NewConversationHandler(convService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	workspaceHandler := handler.NewWorkspaceHandler(workspaceService)
@@ -124,6 +142,7 @@ func main() {
 	r := gin.Default()
 	r.Use(corsMiddleware())
 	chatHandler.Register(r)
+	approvalHandler.Register(r)
 	convHandler.Register(r)
 	projectHandler.Register(r)
 	workspaceHandler.Register(r)

@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 import { cn } from "@/lib/utils";
 
@@ -22,10 +23,16 @@ export function PromptInput({
   streaming,
   onSend,
   onCancel,
+  toolbarLeft,
 }: {
   streaming: boolean;
   onSend: (text: string) => void;
   onCancel: () => void;
+  // Optional slot rendered in the bottom-left of the composer toolbar,
+  // replacing the default "Enter 发送" hint. Used for per-conversation
+  // controls like the approval-mode dropdown that logically belong next to
+  // the input but shouldn't be baked into PromptInput.
+  toolbarLeft?: ReactNode;
 }) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -113,8 +120,12 @@ export function PromptInput({
           />
 
           <div className="flex items-center justify-between gap-3 px-3 pb-2.5 pt-1">
-            <div className="pl-2 font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
-              {streaming ? "响应中" : "Enter 发送 · Shift+Enter 换行"}
+            <div className="flex items-center gap-2 pl-2 min-w-0">
+              {toolbarLeft ?? (
+                <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
+                  {streaming ? "响应中" : "Enter 发送 · Shift+Enter 换行"}
+                </div>
+              )}
             </div>
 
             {streaming ? (

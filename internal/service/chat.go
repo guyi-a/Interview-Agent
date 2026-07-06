@@ -11,18 +11,21 @@ import (
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/contextkey"
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
+	"github.com/guyi-a/Interview-Agent/internal/approval"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/repository/model"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
 )
 
 type ChatService struct {
-	runner      *adk.Runner
-	rootName    string
-	manager     *stream.Manager
-	convRepo    *repository.ConversationRepo
-	msgRepo     *repository.MessageRepo
-	projectRepo *repository.ProjectRepo
+	runner        *adk.Runner
+	rootName      string
+	manager       *stream.Manager
+	convRepo      *repository.ConversationRepo
+	msgRepo       *repository.MessageRepo
+	projectRepo   *repository.ProjectRepo
+	pending       *approval.PendingStore
+	approvalModes *approval.ModeStore
 }
 
 func NewChatService(
@@ -32,14 +35,18 @@ func NewChatService(
 	convRepo *repository.ConversationRepo,
 	msgRepo *repository.MessageRepo,
 	projectRepo *repository.ProjectRepo,
+	pending *approval.PendingStore,
+	approvalModes *approval.ModeStore,
 ) *ChatService {
 	return &ChatService{
-		runner:      runner,
-		rootName:    rootName,
-		manager:     manager,
-		convRepo:    convRepo,
-		msgRepo:     msgRepo,
-		projectRepo: projectRepo,
+		runner:        runner,
+		rootName:      rootName,
+		manager:       manager,
+		convRepo:      convRepo,
+		msgRepo:       msgRepo,
+		projectRepo:   projectRepo,
+		pending:       pending,
+		approvalModes: approvalModes,
 	}
 }
 
@@ -111,9 +118,57 @@ func (s *ChatService) Start(ctx context.Context, id, userMsg, projectID string) 
 	runCtx, cancel := context.WithCancel(context.Background())
 	buf.SetCancel(cancel)
 
+	// Any leftover pending approvals from a previous, discarded run would
+	// mismatch the checkpoint eino is about to overwrite. Clear now so the
+	// only pending items visible to the HTTP layer belong to this run.
+	s.pending.Clear(id)
+
 	go s.runAgent(runCtx, id, history, buf)
 
 	return buf, nil
+}
+
+// Resume delivers the user's approval decision for an interrupted run and
+// re-enters the same conversation's SSE stream with a fresh iterator. Returns
+// (found, nil) on success, or (false, nil) if the interrupt id isn't known
+// (already acted on, or stale). Errors from the ADK layer bubble up.
+func (s *ChatService) Resume(convID, interruptID string, dec approval.Decision) (bool, error) {
+	item, ok := s.pending.Take(convID, interruptID)
+	if !ok {
+		return false, nil
+	}
+
+	// The previous SSE buffer was Finish()ed when the interrupt drained the
+	// iterator, so a resumed run can't Append into it. Replace with a fresh
+	// buffer — the frontend will GET /chat/:id to reconnect and drain it.
+	buf := s.manager.Create(convID)
+	runCtx, cancel := context.WithCancel(context.Background())
+	buf.SetCancel(cancel)
+
+	go s.resumeAgent(runCtx, convID, item.CheckpointID, interruptID, dec, buf)
+	return true, nil
+}
+
+// PendingApprovals returns in-memory approval requests that are still waiting
+// for a user decision. The ADK checkpoint itself lives in SQLite; this list is
+// just the UI lookup metadata needed after a page refresh.
+func (s *ChatService) PendingApprovals(convID string) []approval.PendingItem {
+	if s.pending == nil {
+		return nil
+	}
+	return s.pending.List(convID)
+}
+
+// GetApprovalMode returns the per-conversation approval mode, defaulting to
+// approval.ModeDefault when the conversation has never explicitly set one
+// (including after a server restart, which is intentional — see mode.go).
+func (s *ChatService) GetApprovalMode(convID string) approval.Mode {
+	return s.approvalModes.Get(convID)
+}
+
+// SetApprovalMode validates and stores the mode. Called from the HTTP handler.
+func (s *ChatService) SetApprovalMode(convID string, m approval.Mode) error {
+	return s.approvalModes.Set(convID, m)
 }
 
 func (s *ChatService) workspaceContext(ctx context.Context, convID string) string {
@@ -134,32 +189,104 @@ func (s *ChatService) workspaceContext(ctx context.Context, convID string) strin
 func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schema.Message, buf *stream.StreamBuffer) {
 	ctx = contextkey.WithConversationID(ctx, convID)
 	ctx = contextkey.WithBuffer(ctx, buf)
-	// Per-run registry so the tool-error middleware and the SSE handler agree
-	// on which tool calls were rescued from a failure. SSE emits ok=false
-	// for those, ok=true otherwise.
 	ctx = toolerr.WithRegistry(ctx, toolerr.NewRegistry())
 
 	collector := stream.NewRunCollector()
+	sink := s.approvalSink(convID)
 
-	iter := s.runner.Run(ctx, msgs)
-	if err := stream.ConsumeADKEvents(ctx, iter, s.rootName, buf, collector); err != nil {
+	_ = s.convRepo.SetAgentStatus(context.Background(), convID, "running")
+
+	// Checkpoint id is stable per conversation — one active run at a time is
+	// enforced by manager.Create above, so reusing convID as the eino
+	// checkpoint id keeps resume lookups trivial.
+	iter := s.runner.Run(ctx, msgs, adk.WithCheckPointID(convID))
+	s.consumeAndPersist(ctx, convID, iter, sink, buf, collector)
+}
+
+func (s *ChatService) resumeAgent(
+	ctx context.Context,
+	convID, checkpointID, interruptID string,
+	dec approval.Decision,
+	buf *stream.StreamBuffer,
+) {
+	ctx = contextkey.WithConversationID(ctx, convID)
+	ctx = contextkey.WithBuffer(ctx, buf)
+	ctx = toolerr.WithRegistry(ctx, toolerr.NewRegistry())
+
+	collector := stream.NewRunCollector()
+	sink := s.approvalSink(convID)
+
+	_ = s.convRepo.SetAgentStatus(context.Background(), convID, "running")
+
+	iter, err := s.runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
+		Targets: map[string]any{interruptID: dec},
+	})
+	if err != nil {
+		log.Printf("adk resume error (conv=%s): %v", convID, err)
+		_ = s.convRepo.SetAgentStatus(context.Background(), convID, "idle")
+		stream.FinalizeErr(buf, err)
+		return
+	}
+	s.consumeAndPersist(ctx, convID, iter, sink, buf, collector)
+}
+
+// approvalSink wraps the pending store's sink with a side effect: whenever a
+// tool call pauses for approval, mark the conversation waiting_approval so
+// the sidebar pill lights up. The end-of-run finalizer flips it back.
+func (s *ChatService) approvalSink(convID string) stream.InterruptSink {
+	inner := s.pending.Record(convID)
+	return sinkFunc(func(checkpointID, interruptID string, info any) {
+		inner.Record(checkpointID, interruptID, info)
+		_ = s.convRepo.SetAgentStatus(context.Background(), convID, "waiting_approval")
+	})
+}
+
+type sinkFunc func(checkpointID, interruptID string, info any)
+
+func (f sinkFunc) Record(checkpointID, interruptID string, info any) {
+	f(checkpointID, interruptID, info)
+}
+
+// consumeAndPersist drives the iterator, persists the run's turns, and
+// finalises the SSE buffer. Shared between the initial Run and post-approval
+// Resume paths so both take the same code path.
+func (s *ChatService) consumeAndPersist(
+	ctx context.Context,
+	convID string,
+	iter *adk.AsyncIterator[*adk.AgentEvent],
+	sink stream.InterruptSink,
+	buf *stream.StreamBuffer,
+	collector *stream.RunCollector,
+) {
+	if err := stream.ConsumeADKEvents(ctx, iter, s.rootName, convID, sink, buf, collector); err != nil {
 		log.Printf("adk runner error: %v", err)
-		// Still attempt to persist whatever the collector already captured, so
-		// the user's history reflects the assistant text they saw. persistRun
-		// pads missing tool_result rows so the tool_use/tool_result pairing
-		// stays valid for the next replay.
-		if perr := s.persistRun(convID, collector); perr != nil {
+		if perr := s.persistRun(convID, collector, false); perr != nil {
 			log.Printf("persist run (on error path): %v", perr)
 		}
+		s.finalizeStatus(convID)
 		stream.FinalizeErr(buf, err)
 		return
 	}
 
-	if err := s.persistRun(convID, collector); err != nil {
+	interrupted := s.pending.HasPending(convID)
+	if err := s.persistRun(convID, collector, interrupted); err != nil {
 		log.Printf("persist run: %v", err)
 	}
 	_ = s.convRepo.Upsert(context.Background(), convID)
+	s.finalizeStatus(convID)
 	stream.FinalizeOK(buf)
+}
+
+// finalizeStatus sets the conversation status based on whether there are
+// still items awaiting approval. Called after the iterator drains — an
+// interrupt causes the iter to end naturally, so this path fires both for
+// clean completions and for paused runs.
+func (s *ChatService) finalizeStatus(convID string) {
+	status := "idle"
+	if s.pending.HasPending(convID) {
+		status = "waiting_approval"
+	}
+	_ = s.convRepo.SetAgentStatus(context.Background(), convID, status)
 }
 
 // persistRun serialises one completed run into raw per-message rows:
@@ -180,7 +307,7 @@ func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schem
 // wire format, so the frontend's tool-card and sub-agent rendering paths
 // keep working while the handler-side fold logic (see handler.fromModelMessage)
 // is being validated.
-func (s *ChatService) persistRun(convID string, collector *stream.RunCollector) error {
+func (s *ChatService) persistRun(convID string, collector *stream.RunCollector, skipMissingToolPadding bool) error {
 	turns := collector.Turns()
 	if len(turns) == 0 {
 		// Nothing captured (e.g. an early ADK error before any event). Nothing
@@ -194,7 +321,10 @@ func (s *ChatService) persistRun(convID string, collector *stream.RunCollector) 
 	lastAssistantIdx := len(turns) - 1
 
 	for i, t := range turns {
-		padded := padMissingToolResults(t)
+		padded := t
+		if !skipMissingToolPadding {
+			padded = padMissingToolResults(t)
+		}
 
 		assistantRow := &model.Message{
 			ConversationID:   convID,

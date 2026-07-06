@@ -6,6 +6,8 @@ import { useProjectStore } from "@/stores/projects";
 import { Transcript } from "@/features/chat/Transcript";
 import { PromptInput } from "@/features/chat/PromptInput";
 import { ConversationHeader } from "@/features/chat/ConversationHeader";
+import { ApprovalBar } from "@/features/chat/ApprovalBar";
+import { ApprovalModeDropdown } from "@/features/chat/ApprovalModeDropdown";
 import { WorkspacePanel } from "@/features/workspace/WorkspacePanel";
 
 export function Conversation() {
@@ -34,7 +36,7 @@ export function Conversation() {
     refreshProjects();
   }, [refreshConvs, refreshProjects]);
 
-  const { turns, loading, streaming, send, cancel } = useChatStream(id, {
+  const { turns, loading, streaming, send, cancel, resume } = useChatStream(id, {
     onProjectBound,
     projectId,
   });
@@ -45,6 +47,16 @@ export function Conversation() {
     refreshConvs();
     refreshProjects();
   };
+
+  // After the user answers an approval, the backend spins up a new run and
+  // we reconnect to it via resume(). When that run drains, refresh the
+  // sidebar so the "等待审批" pill drops (or stays, if another interrupt
+  // fired) and updated_at reflects the new activity.
+  const onApprovalResume = useCallback(async () => {
+    await resume();
+    refreshConvs();
+    refreshProjects();
+  }, [resume, refreshConvs, refreshProjects]);
 
   const pendingFiredRef = useRef(false);
   useEffect(() => {
@@ -73,7 +85,15 @@ export function Conversation() {
       <div className="flex-1 min-h-0 flex">
         <div className="flex-1 min-w-0 flex flex-col">
           <Transcript turns={turns} streaming={streaming} />
-          <PromptInput streaming={streaming} onSend={onSend} onCancel={cancel} />
+          <div className="relative">
+            <PromptInput
+              streaming={streaming}
+              onSend={onSend}
+              onCancel={cancel}
+              toolbarLeft={<ApprovalModeDropdown conversationID={id} />}
+            />
+            <ApprovalBar conversationID={id} onResume={onApprovalResume} />
+          </div>
         </div>
         <WorkspacePanel streaming={streaming} projectId={projectId} />
       </div>

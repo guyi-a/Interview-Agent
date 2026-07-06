@@ -436,6 +436,13 @@ function statusBits(status: ToolCall["status"]): {
   label: string;
   labelClass: string;
 } {
+  if (status === "pending") {
+    return {
+      dot: <span className="inline-block size-1.5 rounded-full bg-amber-500" />,
+      label: "pending",
+      labelClass: "text-amber-700 font-medium",
+    };
+  }
   if (status === "running") {
     return {
       dot: (
@@ -468,6 +475,13 @@ function statusBits(status: ToolCall["status"]): {
       ),
       label: "done",
       labelClass: "text-emerald-600 font-medium",
+    };
+  }
+  if (status === "cancelled") {
+    return {
+      dot: <span className="inline-block size-1.5 rounded-full bg-muted" />,
+      label: "cancelled",
+      labelClass: "text-muted font-medium",
     };
   }
   return {
