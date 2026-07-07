@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	dbPath          = "interview.db"
+	dbPath          = "data/interview.db"
 	workspaceRoot   = ".workspace"
 	addr            = ":9001"
 	shutdownTimeout = 5 * time.Second
@@ -59,6 +59,11 @@ func main() {
 	log.Printf("LLM cfg: model=%s thinking=%v", cfg.LLM.Model, cfg.LLM.EnableThinking)
 
 	ctx := context.Background()
+
+	// dbPath 现在指向 data/ 下的文件；确保目录存在，避免第一次跑挂
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		log.Fatalf("mkdir db dir: %v", err)
+	}
 
 	db, err := repository.NewDB(dbPath)
 	if err != nil {

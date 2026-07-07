@@ -45,9 +45,41 @@ func (c ApprovalFastConfig) Enabled() bool {
 	return c.APIKey != "" && c.BaseURL != "" && c.Model != ""
 }
 
+// EmbeddingConfig targets an OpenAI-compatible /embeddings endpoint used by
+// the RAG layer to encode chunks and queries. Default deployment is Aliyun
+// DashScope in "compatible-mode" (same wire shape as OpenAI's endpoint),
+// but any OpenAI-compatible embedding service works.
+//
+// BatchSize caps how many inputs go in one request — DashScope's compatible
+// mode currently limits text-embedding-v3 to 10 per call, so the client
+// auto-chunks larger inputs. Dimensions is sent when the model supports
+// truncated output (v3/v4); providers that ignore it just return native dim.
+type EmbeddingConfig struct {
+	APIKey         string
+	BaseURL        string
+	Model          string
+	Dimensions     int
+	BatchSize      int
+	TimeoutSeconds int
+}
+
+func (c EmbeddingConfig) Enabled() bool {
+	return c.APIKey != "" && c.BaseURL != "" && c.Model != ""
+}
+
+// RagConfig 只管 RAG 层路径/切分参数。embedding 相关继续走 EmbeddingConfig。
+type RagConfig struct {
+	DocsDir      string // markdown 源目录
+	DBPath       string // rag.db 文件路径
+	ChunkSize    int
+	ChunkOverlap int
+}
+
 type Config struct {
 	LLM          LLMConfig
 	ApprovalFast ApprovalFastConfig
+	Embedding    EmbeddingConfig
+	Rag          RagConfig
 }
 
 func Load() (*Config, error) {
@@ -70,6 +102,20 @@ func Load() (*Config, error) {
 			MaxTokens:      getEnvInt("APPROVAL_FAST_MAX_TOKENS", 512),
 			TimeoutSeconds: getEnvInt("APPROVAL_FAST_TIMEOUT", 15),
 		},
+		Embedding: EmbeddingConfig{
+			APIKey:         os.Getenv("EMBEDDING_API_KEY"),
+			BaseURL:        getEnv("EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+			Model:          getEnv("EMBEDDING_MODEL", "text-embedding-v3"),
+			Dimensions:     getEnvInt("EMBEDDING_DIMENSIONS", 1024),
+			BatchSize:      getEnvInt("EMBEDDING_BATCH_SIZE", 10),
+			TimeoutSeconds: getEnvInt("EMBEDDING_TIMEOUT", 30),
+		},
+		Rag: RagConfig{
+			DocsDir:      getEnv("RAG_DOCS_DIR", "docs/rag_docs"),
+			DBPath:       getEnv("RAG_DB_PATH", "data/rag.db"),
+			ChunkSize:    getEnvInt("RAG_CHUNK_SIZE", 500),
+			ChunkOverlap: getEnvInt("RAG_CHUNK_OVERLAP", 80),
+		},
 	}
 
 	if cfg.LLM.APIKey == "" {
@@ -86,15 +132,25 @@ func Load() (*Config, error) {
 }
 
 func loadDotenv() {
-	for _, rel := range []string{".env", "../.env", "../../.env"} {
-		abs, err := filepath.Abs(rel)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(abs); err == nil {
-			_ = godotenv.Overload(abs)
+	// Walk up from cwd until we find a .env or hit filesystem root.
+	// Tests can live 3+ dirs deep (internal/rag/embedding/...) so a
+	// fixed 2-level lookup wasn't enough. Cap the walk to avoid climbing
+	// past the repo when run from an unexpected cwd.
+	dir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	for range 8 {
+		candidate := filepath.Join(dir, ".env")
+		if _, err := os.Stat(candidate); err == nil {
+			_ = godotenv.Overload(candidate)
 			return
 		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
 	}
 }
 

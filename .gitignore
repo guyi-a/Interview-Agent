@@ -49,6 +49,7 @@ temp/
 *.tmp
 
 # Project local data
+data/
 *.db
 *.db-shm
 *.db-wal
