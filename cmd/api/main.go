@@ -22,6 +22,9 @@ import (
 	"github.com/guyi-a/Interview-Agent/internal/approval"
 	"github.com/guyi-a/Interview-Agent/internal/config"
 	"github.com/guyi-a/Interview-Agent/internal/handler"
+	ragembedding "github.com/guyi-a/Interview-Agent/internal/rag/embedding"
+	ragretriever "github.com/guyi-a/Interview-Agent/internal/rag/retriever"
+	ragstore "github.com/guyi-a/Interview-Agent/internal/rag/store"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/service"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
@@ -115,12 +118,13 @@ func main() {
 		BrowserUseMgr:    browserMgr,
 		BridgeService:    bridgeSvc,
 		SkillLoader:      skillLoader,
+		RAGRetriever:     buildRAGRetriever(cfg),
 	})
 	if err != nil {
 		log.Fatalf("tools.Builtin: %v", err)
 	}
 
-	ag, err := agent.NewInterviewADKAgent(ctx, cm, ts, skillLoader, checkpointRepo, approvalModes, classifier)
+	ag, err := agent.NewInterviewADKAgent(ctx, cm, ts, skillLoader, checkpointRepo, convRepo, projectRepo, approvalModes, classifier)
 	if err != nil {
 		log.Fatalf("agent.NewInterviewADKAgent: %v", err)
 	}
@@ -189,4 +193,33 @@ func main() {
 	}
 
 	log.Print("shutdown complete")
+}
+
+// buildRAGRetriever 构造 vec+bm25 hybrid retriever。任何一步失败都返回 nil，
+// tools.Builtin 会因此跳过 rag_search 工具的注册 —— agent 感知不到 RAG 存在。
+// 这样 RAG 相关配置缺失只影响面试题库检索能力，不阻塞主流程启动。
+func buildRAGRetriever(cfg *config.Config) ragretriever.Retriever {
+	if !cfg.Embedding.Enabled() {
+		log.Printf("rag: EMBEDDING_API_KEY 未配置，rag_search 工具未启用")
+		return nil
+	}
+	dbPath := cfg.Rag.DBPath
+	if dbPath == "" {
+		dbPath = "data/rag.db"
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		log.Printf("rag: 找不到 %s，rag_search 工具未启用（先跑 `go run ./cmd/rag-index`）: %v", dbPath, err)
+		return nil
+	}
+	ragDB, err := ragstore.Open(dbPath)
+	if err != nil {
+		log.Printf("rag: 打开 %s 失败，rag_search 工具未启用: %v", dbPath, err)
+		return nil
+	}
+	emb := ragembedding.New(cfg.Embedding)
+	log.Printf("rag: 启用 rag_search，db=%s model=%s", dbPath, cfg.Embedding.Model)
+	return ragretriever.NewHybrid(
+		ragretriever.NewBruteForce(ragDB, emb),
+		ragretriever.NewBM25(ragDB),
+	)
 }

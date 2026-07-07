@@ -49,7 +49,15 @@ func NewCreateWorkspaceTool(
 			return nil, fmt.Errorf("load conversation: %w", err)
 		}
 		if conv != nil && conv.ProjectID != nil && *conv.ProjectID != "" {
-			return nil, fmt.Errorf("this conversation is already bound to workspace %q; cannot create a new one", *conv.ProjectID)
+			existingSlug := *conv.ProjectID
+			existingName := existingSlug
+			if p, _ := projectRepo.Get(ctx, existingSlug); p != nil && p.Name != "" {
+				existingName = p.Name
+			}
+			return nil, fmt.Errorf(
+				"当前会话已绑定工作区 %q (slug=%s)，不能再次创建工作区。请直接使用相对路径在现有工作区读写文件。",
+				existingName, existingSlug,
+			)
 		}
 
 		if !slugPattern.MatchString(in.Slug) {

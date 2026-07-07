@@ -10,6 +10,7 @@ import (
 	"github.com/guyi-a/Interview-Agent/internal/agent/browserbridge"
 	"github.com/guyi-a/Interview-Agent/internal/agent/browseruse"
 	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
+	"github.com/guyi-a/Interview-Agent/internal/rag/retriever"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 )
 
@@ -22,6 +23,8 @@ type Deps struct {
 	BrowserUseMgr    *browseruse.Manager
 	BridgeService    *browserbridge.Service
 	SkillLoader      *skills.Loader
+	// RAGRetriever 可为 nil：nil 时 rag_search 工具不注册，agent 感知不到 RAG 存在。
+	RAGRetriever retriever.Retriever
 }
 
 // Builtin returns the full set of tools wired up with the given deps.
@@ -89,6 +92,14 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 			return nil, err
 		}
 		out = append(out, ls)
+	}
+
+	if d.RAGRetriever != nil {
+		rag, err := newRAGSearchTool(d.RAGRetriever)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rag)
 	}
 
 	return out, nil

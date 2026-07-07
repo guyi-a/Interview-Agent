@@ -12,6 +12,7 @@ import (
 
 	"github.com/guyi-a/Interview-Agent/internal/agent/checkpoint"
 	"github.com/guyi-a/Interview-Agent/internal/agent/prompts"
+	"github.com/guyi-a/Interview-Agent/internal/agent/runtimectx"
 	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
 	"github.com/guyi-a/Interview-Agent/internal/approval"
@@ -22,9 +23,11 @@ import (
 //   - SupervisorAgentName 用作 SSE 翻译的根 agent 白名单（adk_handler 只渲染根 agent 的事件）
 //   - DeepResearchAgentName 同时是 sub-agent 的标识符，也是模型看到的工具名
 const (
-	SupervisorAgentName   = "supervisor"
-	DeepResearchAgentName = "deep_research"
-	JobSearchAgentName    = "job_search"
+	SupervisorAgentName      = "supervisor"
+	DeepResearchAgentName    = "deep_research"
+	JobSearchAgentName       = "job_search"
+	ResumeAnalyzerAgentName  = "resume_analyzer"
+	QuestionPlannerAgentName = "question_planner"
 )
 
 // ADKBundle 把 root agent 和 runner 一起暴露给上层。
@@ -52,6 +55,8 @@ func NewInterviewADKAgent(
 	baseTools []tool.BaseTool,
 	skillLoader *skills.Loader,
 	checkpointRepo *repository.CheckpointRepo,
+	convRepo *repository.ConversationRepo,
+	projectRepo *repository.ProjectRepo,
 	approvalModes *approval.ModeStore,
 	classifier *approval.Classifier,
 ) (*ADKBundle, error) {
@@ -60,6 +65,11 @@ func NewInterviewADKAgent(
 	}
 	supervisorInstruction := prompts.WithSkillsIndex(prompts.Supervisor, skillLoader)
 	deepResearchInstruction := prompts.WithSkillsIndex(prompts.DeepResearch, skillLoader)
+
+	// runtime middleware：每次 agent 运行开始时把当前 workspace 状态拼进 instruction。
+	// 所有 sub-agent 共用同一个实例（无状态），保证主 agent 和 sub-agent 看到的
+	// workspace 视图一致。
+	workspaceMW := runtimectx.NewWorkspaceMiddleware(convRepo, projectRepo)
 
 	// 1) 后台研究员
 	//    - 不带 Backend：继续用我们自己的 workspace/fs 工具（baseTools），不引入 ADK 原生 filesystem
@@ -116,10 +126,59 @@ func NewInterviewADKAgent(
 	}
 	jobTool := adk.NewAgentTool(ctx, jobAgent)
 
-	// 4) Supervisor 工具列表 = baseTools + deep + job_search
-	supervisorTools := make([]tool.BaseTool, 0, len(baseTools)+2)
+	// 4) 简历自评员：帮"求职者本人"分析自己的简历 vs 目标 JD，识别匹配度、
+	//    差距、面试要点。产出 self_review.md 供用户自查。
+	resumeAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        ResumeAnalyzerAgentName,
+		Description: "求职者简历自评员。当用户（求职者）说'帮我看看这份简历怎么样'、'面 XX 岗合适吗'、'分析下我的简历跟 JD 的匹配度'时委派。传 request 说明简历路径 + JD（文本或路径）+ 目标岗位。会产出 reports/self_review.md（自评报告，用'你'称呼用户），返回路径。不要用于纯读文件、跟简历无关的技术问答。",
+		Instruction: prompts.WithSkillsIndex(prompts.ResumeAnalyzer, skillLoader),
+		Model:       cm,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: baseTools,
+				ToolCallMiddlewares: []compose.ToolMiddleware{
+					approval.Middleware(approvalModes, classifier),
+					toolerr.Middleware(),
+				},
+			},
+		},
+		Handlers:      []adk.ChatModelAgentMiddleware{workspaceMW},
+		MaxIterations: 30,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("adk.NewChatModelAgent(resume_analyzer): %w", err)
+	}
+	resumeTool := adk.NewAgentTool(ctx, resumeAgent)
+
+	// 5) 面试模拟题生成员：为"求职者本人"生成 TA 可能面试遇到的题目 + 参考答案。
+	//    输出多个小文件（basic/experience/design/README），一次 write_file 一个，
+	//    避开上游流式协议在大 tool_call args 时的序列化 bug。
+	plannerAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        QuestionPlannerAgentName,
+		Description: "求职者面试模拟题生成员。当用户（求职者）说'根据我简历给我出些题练练'、'准备一套模拟面试题'、'给我一份复习题'时委派。传 request 说明简历自评报告路径 + JD + 可选偏好（题量/难度）。会产出 reports/questions/ 目录下多个 md（basic/experience/design/README）并返回索引路径。前置：必须先跑 resume_analyzer 生成自评报告。",
+		Instruction: prompts.WithSkillsIndex(prompts.QuestionPlanner, skillLoader),
+		Model:       cm,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: baseTools,
+				ToolCallMiddlewares: []compose.ToolMiddleware{
+					approval.Middleware(approvalModes, classifier),
+					toolerr.Middleware(),
+				},
+			},
+		},
+		Handlers:      []adk.ChatModelAgentMiddleware{workspaceMW},
+		MaxIterations: 50,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("adk.NewChatModelAgent(question_planner): %w", err)
+	}
+	plannerTool := adk.NewAgentTool(ctx, plannerAgent)
+
+	// 6) Supervisor 工具列表 = baseTools + 4 个 sub-agent tool
+	supervisorTools := make([]tool.BaseTool, 0, len(baseTools)+4)
 	supervisorTools = append(supervisorTools, baseTools...)
-	supervisorTools = append(supervisorTools, deepTool, jobTool)
+	supervisorTools = append(supervisorTools, deepTool, jobTool, resumeTool, plannerTool)
 
 	supervisor, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        SupervisorAgentName,
@@ -138,6 +197,7 @@ func NewInterviewADKAgent(
 			// Runner's iter so the UI can show real-time progress.
 			EmitInternalEvents: true,
 		},
+		Handlers:      []adk.ChatModelAgentMiddleware{workspaceMW},
 		MaxIterations: 50,
 	})
 	if err != nil {

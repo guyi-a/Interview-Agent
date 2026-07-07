@@ -134,7 +134,60 @@ const ROLE_LABEL: Record<ChatTurn["role"], string> = {
 // Sub-agent tools — wrapped via adk.NewAgentTool on the backend. When
 // these appear in tool_call events, label them as AGENT so the UI reflects
 // delegation, not a plain tool invocation.
-const AGENT_TOOL_NAMES = new Set(["job_search", "deep_research"]);
+const AGENT_TOOL_NAMES = new Set([
+  "job_search",
+  "deep_research",
+  "resume_analyzer",
+  "question_planner",
+]);
+
+// GROUPABLE_TOOL_NAMES: 这些工具在同一 turn 里连续调用 ≥2 次时会折叠成
+// 单行"TOOL name × N status"，避免侧栏被大量同名条目撑满。目前只有
+// rag_search 这类高频、每条价值低的工具适合折叠；其他工具（write_file 等）
+// 语义上每次都不同，不合并。
+const GROUPABLE_TOOL_NAMES = new Set(["rag_search"]);
+
+type ToolRow =
+  | { kind: "single"; tool: ToolCall; index: number }
+  | { kind: "group"; tools: ToolCall[]; index: number };
+
+// groupConsecutiveTools 把 tools 数组按"连续同名可折叠工具"合并成 rows。
+// 可折叠工具（GROUPABLE_TOOL_NAMES）**总是**走 ToolGroup 渲染，即使只有 1 次
+// 也显示 "× 1"，保持视觉一致（避免第 1 次渲染成可展开 ToolEntry、第 2 次
+// 突然变成紧凑组的跳变）。
+function groupConsecutiveTools(tools: ToolCall[]): ToolRow[] {
+  const rows: ToolRow[] = [];
+  let i = 0;
+  while (i < tools.length) {
+    const t = tools[i];
+    if (GROUPABLE_TOOL_NAMES.has(t.name)) {
+      let j = i + 1;
+      while (j < tools.length && tools[j].name === t.name) j++;
+      rows.push({ kind: "group", tools: tools.slice(i, j), index: i });
+      i = j;
+      continue;
+    }
+    rows.push({ kind: "single", tool: t, index: i });
+    i++;
+  }
+  return rows;
+}
+
+// aggregateStatus 汇总一组同名工具的整体状态：任何错误 → error；任何
+// running → running；任何 pending → pending；否则 ok。cancelled 归入 ok
+// 以免整组"部分取消"闪红。
+function aggregateStatus(tools: ToolCall[]): ToolCall["status"] {
+  let hasRunning = false;
+  let hasPending = false;
+  for (const t of tools) {
+    if (t.status === "error") return "error";
+    if (t.status === "running") hasRunning = true;
+    if (t.status === "pending") hasPending = true;
+  }
+  if (hasRunning) return "running";
+  if (hasPending) return "pending";
+  return "ok";
+}
 
 export function TranscriptEntry({
   turn,
@@ -195,19 +248,30 @@ export function TranscriptEntry({
 
       {turn.tools.length > 0 && (
         <div className="my-4 space-y-3">
-          {turn.tools.map((tc) => (
-            <ToolEntry
-              key={tc.id}
-              tool={tc}
-              // Look up children in the conversation-wide pool: a
-              // sub-agent's tool_result can land in a later turn's
-              // subEvents (post-resume) but still belongs under this
-              // tool_call.
-              subEvents={allSubEvents.filter(
-                (e) => e.parentToolCallId === tc.id,
-              )}
-            />
-          ))}
+          {groupConsecutiveTools(turn.tools).map((row) => {
+            if (row.kind === "group") {
+              return (
+                <ToolGroup
+                  key={`grp-${row.tools[0].id || row.index}`}
+                  tools={row.tools}
+                />
+              );
+            }
+            const tc = row.tool;
+            return (
+              <ToolEntry
+                key={tc.id}
+                tool={tc}
+                // Look up children in the conversation-wide pool: a
+                // sub-agent's tool_result can land in a later turn's
+                // subEvents (post-resume) but still belongs under this
+                // tool_call.
+                subEvents={allSubEvents.filter(
+                  (e) => e.parentToolCallId === tc.id,
+                )}
+              />
+            );
+          })}
         </div>
       )}
 
@@ -358,9 +422,23 @@ function SubAgentTimeline({ events }: { events: SubAgentEvent[] }) {
           )}
           {block.tools.length > 0 && (
             <div className="space-y-3">
-              {block.tools.map((tool, i) => (
-                <ToolEntry key={tool.id || `${block.agent}-${i}`} tool={tool} />
-              ))}
+              {groupConsecutiveTools(block.tools).map((row) => {
+                if (row.kind === "group") {
+                  return (
+                    <ToolGroup
+                      key={`grp-${block.agent}-${row.index}`}
+                      tools={row.tools}
+                    />
+                  );
+                }
+                const tool = row.tool;
+                return (
+                  <ToolEntry
+                    key={tool.id || `${block.agent}-${row.index}`}
+                    tool={tool}
+                  />
+                );
+              })}
             </div>
           )}
           {block.content && (
@@ -376,6 +454,34 @@ function SubAgentTimeline({ events }: { events: SubAgentEvent[] }) {
         </div>
       ))}
     </section>
+  );
+}
+
+// ToolGroup 渲染折叠后的连续同名工具组。样式对齐 ToolEntry 但不做展开，
+// 单行显示 "TOOL name × N status"。
+function ToolGroup({ tools }: { tools: ToolCall[] }) {
+  const name = tools[0].name;
+  const status = aggregateStatus(tools);
+  const { dot, label, labelClass } = statusBits(status);
+  return (
+    <aside className="pl-4 border-l-2 border-accent font-mono text-[12px] leading-relaxed">
+      <div className="flex items-baseline gap-2">
+        <span className="text-[11px] tracking-[0.14em] uppercase font-semibold shrink-0 text-ink/75">
+          tool
+        </span>
+        <span className="text-ink">{name}</span>
+        <span className="text-ink/60 tabular-nums">× {tools.length}</span>
+        <span
+          className={cn(
+            "inline-flex items-center gap-1.5 shrink-0 ml-1 text-[11px] uppercase tracking-[0.12em]",
+            labelClass,
+          )}
+        >
+          {dot}
+          <span>{label}</span>
+        </span>
+      </div>
+    </aside>
   );
 }
 
@@ -418,7 +524,10 @@ function ToolEntry({
         </span>
         <span className="text-ink">{tool.name || "(unnamed)"}</span>
         {argLabel && (
-          <span className="text-muted normal-case tracking-normal truncate">
+          <span
+            className="min-w-0 truncate text-muted normal-case tracking-normal"
+            title={argLabel}
+          >
             <span className="text-ink/70">{argLabel}</span>
           </span>
         )}
@@ -570,11 +679,21 @@ function prettyJson(v: unknown): string {
 function toolArgLabel(v: unknown): string {
   if (!v || typeof v !== "object" || Array.isArray(v)) return "";
   const args = v as Record<string, unknown>;
+  for (const key of ["path", "file_path", "filepath", "target_path", "target", "output_path"]) {
+    const value = args[key];
+    if (typeof value === "string" && value) return basename(value);
+  }
   const action = args.action;
   if (typeof action === "string" && action) return action;
   const name = args.name;
   if (typeof name === "string" && name) return name;
   return "";
+}
+
+function basename(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const idx = normalized.lastIndexOf("/");
+  return idx >= 0 ? normalized.slice(idx + 1) || path : path;
 }
 
 function truncate(s: string, n: number): string {

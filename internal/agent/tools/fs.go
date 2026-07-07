@@ -17,7 +17,11 @@ import (
 
 const (
 	maxReadBytes    = 256 * 1024  // 256 KiB
-	maxWriteBytes   = 1024 * 1024 // 1 MiB
+	// maxWriteBytes 限制单次 write_file / edit_file 结果文件大小。
+	// 收紧到 64 KiB 是为了避开上游 SSE 流式协议在超大 tool_call args 时的
+	// 序列化 bug（会产生半个 json.RawMessage，下一轮组装历史时炸）。
+	// 需要超过此限的场景用 write_file_chunked 分多次 append。
+	maxWriteBytes   = 64 * 1024 // 64 KiB
 	binarySniffSize = 512
 )
 
@@ -416,7 +420,7 @@ func newWriteFileTool(d *fsDeps) (tool.BaseTool, error) {
 	}
 	return utils.InferTool(
 		"write_file",
-		"Create or fully overwrite a UTF-8 text file inside the workspace. Missing parent directories are created. Prefer edit_file for partial changes; use this only when creating a new file or rewriting the whole content.",
+		"Create or fully overwrite a UTF-8 text file inside the workspace. Missing parent directories are created. Prefer edit_file for partial changes; use this only when creating a new file or rewriting the whole content. **Size cap: 64 KiB per call** — files above this must be written via write_file_chunked in 小 chunks (each append ≤ 32 KiB, recommended ≤ 15 KiB to stay well below upstream streaming limits).",
 		fn,
 	)
 }

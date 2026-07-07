@@ -20,8 +20,12 @@ import (
 const (
 	chunkedWriteSessionDir = ".chunked_write_sessions"
 	chunkedWriteTTL        = 12 * time.Hour
-	maxChunkBytes          = 256 * 1024       // 256 KiB per append call
-	maxChunkedWriteBytes   = 10 * 1024 * 1024 // 10 MiB final file cap
+	// maxChunkBytes 限制单次 start/append 允许的 content 大小。
+	// 收紧到 32 KiB 是为了避开上游 SSE 流式协议在超大 tool_call args 时的
+	// 序列化 bug（半个 json.RawMessage → 下一轮组装历史时 unmarshal 炸）。
+	// 建议 LLM 每段控制在 ≤ 15 KiB，32 KiB 是硬上限。
+	maxChunkBytes        = 32 * 1024        // 32 KiB per append call
+	maxChunkedWriteBytes = 10 * 1024 * 1024 // 10 MiB final file cap
 )
 
 type ChunkedWriteInput struct {
@@ -68,7 +72,7 @@ func newChunkedWriteFileTool(d *fsDeps) (tool.BaseTool, error) {
 	}
 	return utils.InferTool(
 		"write_file_chunked",
-		"Write a large UTF-8 text file inside the workspace in ordered chunks to avoid oversized tool calls. Flow: start with path, append multiple content chunks, then finish to atomically save the file. Use abort to cancel and clean up. Prefer regular write_file for files under about 200 lines.",
+		"Write a large UTF-8 text file inside the workspace in ordered chunks. Flow: start with path, append multiple content chunks, then finish to atomically save the file. Use abort to cancel and clean up. Prefer regular write_file for files under about 200 lines. **Chunk size cap: 32 KiB per call**; strongly recommend keeping each append ≤ 15 KiB to stay well below upstream streaming limits — larger chunks may fail with json serialization errors. For a 100 KB file, prefer 8-10 appends of ~10 KiB each over 3-4 appends of 30 KiB.",
 		fn,
 	)
 }
