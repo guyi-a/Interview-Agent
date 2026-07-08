@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/guyi-a/Interview-Agent/internal/approval"
+	"github.com/guyi-a/Interview-Agent/internal/hitl"
 	"github.com/guyi-a/Interview-Agent/internal/service"
 )
 
@@ -25,6 +26,9 @@ func NewApprovalHandler(chat *service.ChatService) *ApprovalHandler {
 func (h *ApprovalHandler) Register(r *gin.Engine) {
 	r.GET("/conversations/:id/approvals/pending", h.Pending)
 	r.POST("/conversations/:id/approvals/:interrupt_id", h.Decide)
+	// ask_user 走独立 POST，因为 body 结构（answers）跟 approval 的 decision
+	// 不同，分开更稳；GET pending 端点合并输出两类（每项带 kind 字段）。
+	r.POST("/conversations/:id/questions/:interrupt_id", h.AnswerQuestion)
 	// Mode routes deliberately live OUTSIDE /approvals/ to avoid the
 	// POST /approvals/:interrupt_id catch-all — otherwise POST .../mode
 	// would be routed to Decide with interrupt_id="mode".
@@ -33,10 +37,12 @@ func (h *ApprovalHandler) Register(r *gin.Engine) {
 }
 
 type pendingApprovalItem struct {
-	InterruptID string `json:"interrupt_id"`
-	CallID      string `json:"call_id,omitempty"`
-	Tool        string `json:"tool,omitempty"`
-	ArgsJSON    string `json:"args_json,omitempty"`
+	Kind          string `json:"kind"` // approval | question
+	InterruptID   string `json:"interrupt_id"`
+	CallID        string `json:"call_id,omitempty"`
+	Tool          string `json:"tool,omitempty"`         // 仅 kind=approval
+	ArgsJSON      string `json:"args_json,omitempty"`    // kind=approval：工具参数 JSON
+	QuestionsJSON string `json:"questions_json,omitempty"` // kind=question：[]hitl.Question 的 JSON
 }
 
 func (h *ApprovalHandler) Pending(c *gin.Context) {
@@ -44,12 +50,22 @@ func (h *ApprovalHandler) Pending(c *gin.Context) {
 	items := h.chat.PendingApprovals(convID)
 	out := make([]pendingApprovalItem, 0, len(items))
 	for _, it := range items {
-		out = append(out, pendingApprovalItem{
+		row := pendingApprovalItem{
+			Kind:        string(it.Kind),
 			InterruptID: it.InterruptID,
 			CallID:      it.CallID,
-			Tool:        it.Tool,
-			ArgsJSON:    it.Args,
-		})
+		}
+		if row.Kind == "" {
+			row.Kind = string(hitl.KindApproval)
+		}
+		switch hitl.PendingKind(row.Kind) {
+		case hitl.KindQuestion:
+			row.QuestionsJSON = it.Args
+		default:
+			row.Tool = it.Tool
+			row.ArgsJSON = it.Args
+		}
+		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, gin.H{"approvals": out})
 }
@@ -93,6 +109,55 @@ func (h *ApprovalHandler) Decide(c *gin.Context) {
 		// Stale approval — either the user clicked twice or the run was
 		// cancelled before we got here. 404 lets the frontend clear its
 		// stored pending card without treating this as a real error.
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Status(http.StatusAccepted)
+}
+
+// answerQuestionRequest 是 ask_user 恢复时的 body 契约。cancelled=true 时
+// answers 允许为空，服务端会给工具体一个 Cancelled 标记的 Answers；否则
+// answers 里每条按 question_id 关联 UI 侧的答复。
+type answerQuestionRequest struct {
+	Cancelled bool `json:"cancelled"`
+	Answers   []struct {
+		QuestionID string   `json:"question_id"`
+		Selected   []string `json:"selected,omitempty"`
+		Custom     string   `json:"custom,omitempty"`
+	} `json:"answers,omitempty"`
+}
+
+// AnswerQuestion 接收 ask_user 的用户回复，走跟 approval 一样的 checkpoint
+// resume 通道恢复 run，但 payload 是 hitl.Answers。
+func (h *ApprovalHandler) AnswerQuestion(c *gin.Context) {
+	convID := c.Param("id")
+	interruptID := c.Param("interrupt_id")
+
+	var req answerQuestionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	payload := hitl.Answers{Cancelled: req.Cancelled}
+	if !req.Cancelled {
+		payload.Items = make([]hitl.Answer, 0, len(req.Answers))
+		for _, a := range req.Answers {
+			payload.Items = append(payload.Items, hitl.Answer{
+				QuestionID: a.QuestionID,
+				Selected:   a.Selected,
+				Custom:     a.Custom,
+			})
+		}
+	}
+
+	found, err := h.chat.ResumeQuestion(convID, interruptID, payload)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !found {
+		// 已被消费 / run 被 cancel —— 前端可据此清 pending 卡。
 		c.Status(http.StatusNotFound)
 		return
 	}

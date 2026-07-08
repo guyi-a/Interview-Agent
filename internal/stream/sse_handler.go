@@ -15,6 +15,8 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/guyi-a/Interview-Agent/internal/hitl"
 )
 
 // Frame is the wire shape of one SSE event. Field omitempty so each frame
@@ -50,11 +52,16 @@ type Frame struct {
 	ProjectName   string `json:"project_name,omitempty"`
 	WorkspacePath string `json:"workspace_path,omitempty"`
 
-	// approval_required frame — the tool_call above needs human approval
-	// before eino resumes it. The frontend keys off (CheckpointID + InterruptID)
-	// when POSTing the user's decision.
+	// approval_required / question_required frame — the tool_call above is
+	// paused waiting for the user. The frontend keys off (CheckpointID +
+	// InterruptID) when POSTing the user's decision or answers.
 	CheckpointID string `json:"checkpoint_id,omitempty"`
 	InterruptID  string `json:"interrupt_id,omitempty"`
+
+	// question_required frame — JSON-encoded []hitl.Question that the user
+	// should answer. Kept as string so the wire schema stays flat and the
+	// frontend can lazily decode.
+	QuestionsJSON string `json:"questions_json,omitempty"`
 
 	// Usage
 	Prompt int `json:"prompt,omitempty"`
@@ -73,6 +80,18 @@ type ApprovalInfo struct {
 	Args string
 	// CallID is the eino tool call id (tc-N), so the UI can pin the
 	// approval card visually next to the tool_call frame that spawned it.
+	CallID string
+}
+
+// QuestionInfo is what the ask_user tool attaches to tool.Interrupt so the
+// UI can render a question card. Sibling of ApprovalInfo — both go through
+// the same runner checkpoint / resume path, only the payload shape differs.
+type QuestionInfo struct {
+	// Questions carries the question list the tool asked. Stored on the
+	// wire as JSON via Frame.QuestionsJSON.
+	Questions []hitl.Question
+	// CallID lets the frontend pin the question card visually next to the
+	// tool_call frame that spawned it (mirrors ApprovalInfo.CallID).
 	CallID string
 }
 

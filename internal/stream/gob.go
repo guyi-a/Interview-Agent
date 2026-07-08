@@ -8,4 +8,5 @@ import "encoding/gob"
 // with a "gob: type not registered" error and resume dies.
 func init() {
 	gob.Register(&ApprovalInfo{})
+	gob.Register(&QuestionInfo{})
 }

@@ -6,7 +6,7 @@ import { useProjectStore } from "@/stores/projects";
 import { Transcript } from "@/features/chat/Transcript";
 import { PromptInput } from "@/features/chat/PromptInput";
 import { ConversationHeader } from "@/features/chat/ConversationHeader";
-import { ApprovalBar } from "@/features/chat/ApprovalBar";
+import { PendingInterruptDock } from "@/features/chat/PendingInterruptDock";
 import { ApprovalModeDropdown } from "@/features/chat/ApprovalModeDropdown";
 import { AttachmentChips } from "@/features/chat/AttachmentChips";
 import {
@@ -64,6 +64,7 @@ export function Conversation() {
     cancel,
     resume,
     markApprovalHandled,
+    markQuestionAnswered,
   } = useChatStream(id, {
     onProjectBound,
     projectId,
@@ -119,6 +120,14 @@ export function Conversation() {
     refreshProjects();
   }, [markApprovalHandled, refreshConvs, refreshProjects]);
 
+  // ask_user 场景：用户答完 / 取消后立即把对应 tool 卡从 pending 打成
+  // running 或 cancelled，避免 UI 卡在 pending 状态直到 resume 事件回填。
+  const onQuestionDecision = useCallback(async (callId: string, cancelled: boolean) => {
+    markQuestionAnswered(callId, cancelled);
+    refreshConvs();
+    refreshProjects();
+  }, [markQuestionAnswered, refreshConvs, refreshProjects]);
+
   const onApprovalResume = useCallback(async () => {
     await resume();
     refreshConvs();
@@ -163,9 +172,10 @@ export function Conversation() {
               rightActions={<ApprovalModeDropdown conversationID={id} />}
               onImageFiles={onImageFiles}
             />
-            <ApprovalBar
+            <PendingInterruptDock
               conversationID={id}
-              onDecision={onApprovalDecision}
+              onApprovalDecision={onApprovalDecision}
+              onQuestionDecision={onQuestionDecision}
               onResume={onApprovalResume}
             />
           </div>

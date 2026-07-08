@@ -2,29 +2,36 @@ package approval
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 
+	"github.com/guyi-a/Interview-Agent/internal/hitl"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/repository/model"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
 )
 
-// Pending item — one paused tool call awaiting the user's decision. Keyed
-// externally by conversation id so the HTTP layer can look up the target
-// without knowing checkpoint internals.
+// Pending item — one paused tool call awaiting user input (approval decision
+// or answer to a question). Keyed externally by conversation id so the HTTP
+// layer can look up the target without knowing checkpoint internals.
 type PendingItem struct {
+	// Kind 决定这条 pending 走哪种 UI + resume 路径。缺省视为审批，向后兼容
+	// 已有落盘数据。
+	Kind hitl.PendingKind
 	// CheckpointID is the eino Runner checkpoint id (== conversation id in
-	// our setup), passed to Runner.ResumeWithParams on approval.
+	// our setup), passed to Runner.ResumeWithParams on user input.
 	CheckpointID string
 	// InterruptID is InterruptCtx.ID — the address eino uses to route the
-	// resume decision to the exact middleware invocation that paused.
+	// resume payload to the exact middleware / tool invocation that paused.
 	InterruptID string
-	// CallID lets the frontend align the approval card with its tool_call
+	// CallID lets the frontend align the pending card with its tool_call
 	// frame in the timeline.
 	CallID string
-	// Tool + Args are for display only.
+	// Tool 仅审批场景下有意义（要审的工具名）；question 场景为空。
 	Tool string
+	// Args 是审批场景下的原始工具 JSON 参数；question 场景放 hitl.Question 数组
+	// 的 JSON 序列化，前端拉 pending 时按 Kind 决定怎么解读。
 	Args string
 }
 
@@ -60,17 +67,44 @@ func NewPendingStore(repo *repository.PendingApprovalRepo) *PendingStore {
 func (s *PendingStore) Record(convID string) stream.InterruptSink {
 	return sinkFunc(func(checkpointID, interruptID string, info any) {
 		item := &PendingItem{
+			Kind:         hitl.KindApproval,
 			CheckpointID: checkpointID,
 			InterruptID:  interruptID,
 		}
-		if a, ok := info.(*stream.ApprovalInfo); ok && a != nil {
-			item.Tool = a.Tool
-			item.Args = a.Args
-			item.CallID = a.CallID
+		switch v := info.(type) {
+		case *stream.ApprovalInfo:
+			if v != nil {
+				item.Tool = v.Tool
+				item.Args = v.Args
+				item.CallID = v.CallID
+			}
+		case *stream.QuestionInfo:
+			item.Kind = hitl.KindQuestion
+			if v != nil {
+				item.CallID = v.CallID
+				if raw, err := json.Marshal(v.Questions); err == nil {
+					item.Args = string(raw)
+				}
+			}
 		}
+
 		s.mu.Lock()
-		s.items[convID] = append(s.items[convID], item)
+		// 内存去重：SSE 重连 / 恢复回放场景下 Record 可能被多次调用；同一个
+		// (conv, interrupt) 已在队列里就跳过 append 也不重复写 DB。
+		duplicate := false
+		for _, existing := range s.items[convID] {
+			if existing != nil && existing.InterruptID == interruptID {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			s.items[convID] = append(s.items[convID], item)
+		}
 		s.mu.Unlock()
+		if duplicate {
+			return
+		}
 
 		if s.repo != nil {
 			row := &model.PendingApproval{
@@ -79,10 +113,11 @@ func (s *PendingStore) Record(convID string) stream.InterruptSink {
 				CallID:         item.CallID,
 				Tool:           item.Tool,
 				Args:           item.Args,
+				Kind:           string(item.Kind),
 			}
 			if err := s.repo.Insert(context.Background(), row); err != nil {
-				log.Printf("pending_approvals insert failed (conv=%s interrupt=%s tool=%s): %v",
-					convID, interruptID, item.Tool, err)
+				log.Printf("pending insert failed (conv=%s interrupt=%s kind=%s tool=%s): %v",
+					convID, interruptID, item.Kind, item.Tool, err)
 			}
 		}
 	})
@@ -176,7 +211,13 @@ func (s *PendingStore) Restore(rows []model.PendingApproval) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, r := range rows {
+		kind := hitl.PendingKind(r.Kind)
+		if kind == "" {
+			// 老落盘行（未带 kind 字段）当作审批处理，向后兼容。
+			kind = hitl.KindApproval
+		}
 		item := &PendingItem{
+			Kind:         kind,
 			CheckpointID: r.ConversationID,
 			InterruptID:  r.InterruptID,
 			CallID:       r.CallID,

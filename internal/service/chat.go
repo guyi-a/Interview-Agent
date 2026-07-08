@@ -13,6 +13,7 @@ import (
 	"github.com/guyi-a/Interview-Agent/internal/agent/multimodal"
 	"github.com/guyi-a/Interview-Agent/internal/agent/toolerr"
 	"github.com/guyi-a/Interview-Agent/internal/approval"
+	"github.com/guyi-a/Interview-Agent/internal/hitl"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/repository/model"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
@@ -142,15 +143,9 @@ func (s *ChatService) Resume(convID, interruptID string, dec approval.Decision) 
 		return false, nil
 	}
 
-	// The user has answered this approval, so the conversation is no longer
-	// waiting on this interrupt. If no sibling approvals remain, flip the
-	// sidebar state back to running immediately instead of leaving the
-	// waiting_approval pill visible until the resumed run fully drains.
-	status := "running"
-	if s.pending.HasPending(convID) {
-		status = "waiting_approval"
-	}
-	_ = s.convRepo.SetAgentStatus(context.Background(), convID, status)
+	// 用户已经答了这条 pending。若队列里还有别的 pending，按当前队首 kind
+	// 保留对应的 waiting_* 状态；否则视为 run 继续，切回 running。
+	s.applyWaitingStatus(convID, "running")
 
 	// The previous SSE buffer was Finish()ed when the interrupt drained the
 	// iterator, so a resumed run can't Append into it. Replace with a fresh
@@ -161,6 +156,41 @@ func (s *ChatService) Resume(convID, interruptID string, dec approval.Decision) 
 
 	go s.resumeAgent(runCtx, convID, item.CheckpointID, interruptID, dec, buf)
 	return true, nil
+}
+
+// ResumeQuestion 走跟 Resume 一样的 checkpoint 恢复通道，只是 Targets 里塞
+// 的是 hitl.Answers（gob 已在 hitl 包 init 里注册），由 ask_user 工具体通过
+// GetResumeContext[hitl.Answers] 取回。
+func (s *ChatService) ResumeQuestion(convID, interruptID string, answers hitl.Answers) (bool, error) {
+	item, ok := s.pending.Take(convID, interruptID)
+	if !ok {
+		return false, nil
+	}
+
+	s.applyWaitingStatus(convID, "running")
+
+	buf := s.manager.Create(convID)
+	runCtx, cancel := context.WithCancel(context.Background())
+	buf.SetCancel(cancel)
+
+	go s.resumeAgent(runCtx, convID, item.CheckpointID, interruptID, answers, buf)
+	return true, nil
+}
+
+// applyWaitingStatus 根据当前 pending 队列的队首 kind 更新会话状态：
+//   - 队列空 → fallbackWhenEmpty（通常是 running / idle）
+//   - 队首是 question → waiting_user（sidebar 展示"等待回复"）
+//   - 队首是 approval → waiting_approval（sidebar 展示"等待审批"）
+func (s *ChatService) applyWaitingStatus(convID, fallbackWhenEmpty string) {
+	status := fallbackWhenEmpty
+	if items := s.pending.List(convID); len(items) > 0 {
+		if items[0].Kind == hitl.KindQuestion {
+			status = "waiting_user"
+		} else {
+			status = "waiting_approval"
+		}
+	}
+	_ = s.convRepo.SetAgentStatus(context.Background(), convID, status)
 }
 
 // PendingApprovals returns in-memory approval requests that are still waiting
@@ -217,10 +247,14 @@ func (s *ChatService) runAgent(ctx context.Context, convID string, msgs []*schem
 	s.consumeAndPersist(ctx, convID, iter, sink, buf, collector, nil)
 }
 
+// resumeAgent 恢复被中断的 run。payload 会以 gob 塞进 ResumeParams.Targets
+// 的 value —— 审批场景是 approval.Decision（gob 已在 approval 包 init 里注册），
+// ask_user 场景是 hitl.Answers（gob 在 hitl 包 init 里注册）。类型分岔由
+// 中断点自己在 GetResumeContext[T] 时按 T 做，service 层只负责传递。
 func (s *ChatService) resumeAgent(
 	ctx context.Context,
 	convID, checkpointID, interruptID string,
-	dec approval.Decision,
+	payload any,
 	buf *stream.StreamBuffer,
 ) {
 	ctx = contextkey.WithConversationID(ctx, convID)
@@ -244,7 +278,7 @@ func (s *ChatService) resumeAgent(
 	initialRouter := rebuildOpenToolCalls(priorRows)
 
 	iter, err := s.runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
-		Targets: map[string]any{interruptID: dec},
+		Targets: map[string]any{interruptID: payload},
 	})
 	if err != nil {
 		log.Printf("adk resume error (conv=%s): %v", convID, err)
@@ -296,13 +330,18 @@ func rebuildOpenToolCalls(rows []model.Message) map[string]string {
 }
 
 // approvalSink wraps the pending store's sink with a side effect: whenever a
-// tool call pauses for approval, mark the conversation waiting_approval so
-// the sidebar pill lights up. The end-of-run finalizer flips it back.
+// run pauses, mark the conversation status so the sidebar pill lights up.
+// The status depends on the payload type — approval → waiting_approval，
+// question → waiting_user。End-of-run finalizer flips it back.
 func (s *ChatService) approvalSink(convID string) stream.InterruptSink {
 	inner := s.pending.Record(convID)
 	return sinkFunc(func(checkpointID, interruptID string, info any) {
 		inner.Record(checkpointID, interruptID, info)
-		_ = s.convRepo.SetAgentStatus(context.Background(), convID, "waiting_approval")
+		status := "waiting_approval"
+		if _, ok := info.(*stream.QuestionInfo); ok {
+			status = "waiting_user"
+		}
+		_ = s.convRepo.SetAgentStatus(context.Background(), convID, status)
 	})
 }
 
@@ -343,16 +382,10 @@ func (s *ChatService) consumeAndPersist(
 	stream.FinalizeOK(buf)
 }
 
-// finalizeStatus sets the conversation status based on whether there are
-// still items awaiting approval. Called after the iterator drains — an
-// interrupt causes the iter to end naturally, so this path fires both for
-// clean completions and for paused runs.
+// finalizeStatus 设定会话状态：无 pending → idle；有 pending 按队首 kind 区
+// 分 waiting_approval / waiting_user。iterator 因中断自然结束时也走这里。
 func (s *ChatService) finalizeStatus(convID string) {
-	status := "idle"
-	if s.pending.HasPending(convID) {
-		status = "waiting_approval"
-	}
-	_ = s.convRepo.SetAgentStatus(context.Background(), convID, status)
+	s.applyWaitingStatus(convID, "idle")
 }
 
 // persistRun serialises one completed run into raw per-message rows:

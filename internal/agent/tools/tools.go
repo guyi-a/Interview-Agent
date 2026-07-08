@@ -42,6 +42,12 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 	}
 	out = append(out, timeTool)
 
+	askTool, err := newAskUserTool()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, askTool)
+
 	wsTool, err := NewCreateWorkspaceTool(d.WorkspaceRoot, d.ProjectRepo, d.ConversationRepo)
 	if err != nil {
 		return nil, err

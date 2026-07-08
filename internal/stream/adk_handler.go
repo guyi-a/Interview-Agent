@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -89,12 +90,12 @@ func ConsumeADKEvents(
 			// path — treating it as a hard failure would spray raw gob
 			// bytes into the transcript.
 			if info, ok := compose.ExtractInterruptInfo(ev.Err); ok {
-				emitApprovalRequired(info.InterruptContexts, checkpointID, sink, buf)
+				emitInterrupt(info.InterruptContexts, checkpointID, sink, buf)
 				continue
 			}
 			var sig *adk.InterruptSignal
 			if errors.As(ev.Err, &sig) {
-				emitApprovalRequired(signalToContexts(sig), checkpointID, sink, buf)
+				emitInterrupt(signalToContexts(sig), checkpointID, sink, buf)
 				continue
 			}
 			// Diagnostic: if we get here on what looks like an interrupt
@@ -107,7 +108,7 @@ func ConsumeADKEvents(
 		}
 
 		if ev.Action != nil && ev.Action.Interrupted != nil {
-			emitApprovalRequired(ev.Action.Interrupted.InterruptContexts, checkpointID, sink, buf)
+			emitInterrupt(ev.Action.Interrupted.InterruptContexts, checkpointID, sink, buf)
 			// Fall through: eino may still enqueue trailing events, but the
 			// iter's normal termination follows an interrupt.
 			continue
@@ -180,15 +181,17 @@ func signalToContexts(is *adk.InterruptSignal) []*adk.InterruptCtx {
 	return roots
 }
 
-// emitApprovalRequired turns InterruptContexts into per-context SSE
-// frames + sink notifications. Only ApprovalInfo payloads are recognized —
-// other interrupt kinds get a generic frame with no name/args so the UI can
-// still show "an approval is pending" without crashing on unknown data.
+// emitInterrupt turns InterruptContexts into per-context SSE frames + sink
+// notifications. The frame type depends on payload type:
+//   - *ApprovalInfo → "approval_required"（工具调用等待批准 / 拒绝）
+//   - *QuestionInfo → "question_required"（ask_user 等待用户回答）
+//   - 其他类型 → 走 "approval_required" 兜底空 frame，UI 至少能显示"有 pending"
+//     而不是崩掉
 //
 // Callers pass the flat contexts slice directly rather than a wrapper so
 // this function serves both Action.Interrupted (top-level) and
 // compose.ExtractInterruptInfo (sub-agent bubbled-as-error) paths.
-func emitApprovalRequired(
+func emitInterrupt(
 	contexts []*adk.InterruptCtx,
 	checkpointID string,
 	sink InterruptSink,
@@ -199,14 +202,30 @@ func emitApprovalRequired(
 			continue
 		}
 		frame := Frame{
-			Type:         "approval_required",
 			CheckpointID: checkpointID,
 			InterruptID:  ic.ID,
 		}
-		if req, ok := ic.Info.(*ApprovalInfo); ok && req != nil {
-			frame.ID = req.CallID
-			frame.Name = req.Tool
-			frame.ArgsJSON = req.Args
+		switch info := ic.Info.(type) {
+		case *ApprovalInfo:
+			frame.Type = "approval_required"
+			if info != nil {
+				frame.ID = info.CallID
+				frame.Name = info.Tool
+				frame.ArgsJSON = info.Args
+			}
+		case *QuestionInfo:
+			frame.Type = "question_required"
+			if info != nil {
+				frame.ID = info.CallID
+				// Questions 通过 JSON 塞进扁平字段，前端拿到懒解析。
+				if raw, err := json.Marshal(info.Questions); err == nil {
+					frame.QuestionsJSON = string(raw)
+				}
+			}
+		default:
+			// 未知 payload 类型：给个通用 approval_required 让 UI 不炸，
+			// 但不带具体名字/参数，方便定位"哪种 interrupt 没接上"。
+			frame.Type = "approval_required"
 		}
 		buf.Append(Encode(frame))
 		if sink != nil {

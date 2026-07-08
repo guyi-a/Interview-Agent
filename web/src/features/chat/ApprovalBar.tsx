@@ -144,16 +144,16 @@ export function ApprovalBar({
   };
   const onConfirmDeny = () => submit("deny", reason);
 
+  // 外层定位（absolute + max-width 容器）由 PendingInterruptDock 统一负责，
+  // 这里只输出纯卡片，方便和 QuestionCard 共享同一 dock 外壳。
   return (
-    <div className="absolute inset-0 z-10 flex items-end bg-paper px-6 pb-3 pt-2">
-      <div className="mx-auto w-full max-w-3xl">
-        <div
-          className={cn(
-            "rounded-xl border border-rule bg-paper px-4 py-3",
-            "space-y-3",
-            "shadow-[0_-8px_24px_-8px_rgba(0,0,0,0.14),0_-2px_6px_-2px_rgba(0,0,0,0.08)]",
-          )}
-        >
+    <div
+      className={cn(
+        "rounded-xl border border-rule bg-paper px-4 py-3",
+        "space-y-3",
+        "shadow-[0_-8px_24px_-8px_rgba(0,0,0,0.14),0_-2px_6px_-2px_rgba(0,0,0,0.08)]",
+      )}
+    >
           <div className="flex items-center gap-2.5">
             <ShieldIcon />
             <span className="text-[15px] font-semibold text-ink">
@@ -261,8 +261,6 @@ export function ApprovalBar({
               </div>
             </>
           )}
-        </div>
-      </div>
     </div>
   );
 }

@@ -9,6 +9,7 @@ import {
 } from "@/lib/api";
 import { useWorkspaceStore } from "@/features/workspace/store";
 import { useApprovalStore } from "@/features/chat/approval-store";
+import { useQuestionStore } from "@/features/chat/question-store";
 
 export type ToolCall = {
   id: string;
@@ -57,6 +58,7 @@ type Frame = {
     | "project_bound"
     | "usage"
     | "approval_required"
+    | "question_required"
     | "done"
     | "error";
   // Routing
@@ -75,9 +77,11 @@ type Frame = {
   project_id?: string;
   project_name?: string;
   workspace_path?: string;
-  // approval_required — links the paused tool call to the resume endpoint
+  // approval_required / question_required — links the paused tool call to
+  // the resume endpoint. questions_json 只在 question_required frame 上有值。
   checkpoint_id?: string;
   interrupt_id?: string;
+  questions_json?: string;
 };
 
 const WORKSPACE_TOOL_NAMES = new Set([
@@ -224,7 +228,9 @@ async function runSSELoop(
   ) => void,
   onProjectBound: ((e: ProjectBoundEvent) => void) | undefined,
   onWorkspaceChanged: (() => void) | undefined,
-  onApprovalRequired: ((frame: Frame) => void) | undefined,
+  // onInterruptRequired 处理任意 HITL 中断 frame（approval_required /
+  // question_required）。上游按 f.type 分发到不同 store。
+  onInterruptRequired: ((frame: Frame) => void) | undefined,
   onError: (msg: string) => void,
 ) {
   if (!res.ok || !res.body) {
@@ -348,8 +354,9 @@ async function runSSELoop(
           }
           break;
         case "approval_required":
+        case "question_required":
           if (f.interrupt_id) {
-            onApprovalRequired?.(f);
+            onInterruptRequired?.(f);
           }
           break;
         case "usage":
@@ -398,6 +405,12 @@ export function useChatStream(
   const clearApprovalsRef = useRef(clearApprovals);
   addApprovalRef.current = addApproval;
   clearApprovalsRef.current = clearApprovals;
+  const addQuestion = useQuestionStore((s) => s.add);
+  const clearQuestions = useQuestionStore((s) => s.clear);
+  const addQuestionRef = useRef(addQuestion);
+  const clearQuestionsRef = useRef(clearQuestions);
+  addQuestionRef.current = addQuestion;
+  clearQuestionsRef.current = clearQuestions;
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
 
@@ -500,13 +513,10 @@ export function useChatStream(
           (f) => {
             if (!f.interrupt_id) return;
             if (f.id) {
-              // Patch only — do NOT create a new tool card. An approval
-              // that originates inside a sub-agent's tool call carries a
-              // CallID from the sub-agent's internal id space, which won't
-              // match any top-level tool_call frame; upsertTool would then
-              // spawn a phantom "(unnamed) PENDING" card at the supervisor
-              // level. The ApprovalBar still fires below because that path
-              // uses interrupt_id, not the tool id.
+              // Patch only — do NOT create a new tool card. Sub-agent 内的
+              // 中断带的 CallID 来自子 agent 的 id 空间，跟顶层 tool_call
+              // 对不上；upsertTool 会造出幽灵 "(unnamed) PENDING" 卡。
+              // 底部 dock 仍然按 interrupt_id 显示，不受影响。
               updateAssistant((t) => {
                 const idx = t.tools.findIndex((tc) => tc.id === f.id);
                 if (idx < 0) return t;
@@ -515,12 +525,20 @@ export function useChatStream(
                 return { ...t, tools };
               });
             }
-            addApprovalRef.current(conversationID, {
-              interruptId: f.interrupt_id,
-              callId: f.id ?? "",
-              tool: f.name ?? "",
-              argsJson: f.args_json ?? "",
-            });
+            if (f.type === "question_required") {
+              addQuestionRef.current(conversationID, {
+                interruptId: f.interrupt_id,
+                callId: f.id ?? "",
+                questionsJson: f.questions_json ?? "",
+              });
+            } else {
+              addApprovalRef.current(conversationID, {
+                interruptId: f.interrupt_id,
+                callId: f.id ?? "",
+                tool: f.name ?? "",
+                argsJson: f.args_json ?? "",
+              });
+            }
           },
           setError,
         );
@@ -566,17 +584,27 @@ export function useChatStream(
       setTurns(initialTurns);
 
       try {
-        const approvals = await listPendingApprovals(conversationID);
+        const items = await listPendingApprovals(conversationID);
         if (cancelled) return;
+        // 两类中断共用一个 REST 端点，前端拉回来后按 kind 分发到各自的 store。
         clearApprovalsRef.current(conversationID);
-        for (const item of approvals) {
+        clearQuestionsRef.current(conversationID);
+        for (const item of items) {
           if (!item.interrupt_id) continue;
-          addApprovalRef.current(conversationID, {
-            interruptId: item.interrupt_id,
-            callId: item.call_id ?? "",
-            tool: item.tool ?? "",
-            argsJson: item.args_json ?? "",
-          });
+          if (item.kind === "question") {
+            addQuestionRef.current(conversationID, {
+              interruptId: item.interrupt_id,
+              callId: item.call_id ?? "",
+              questionsJson: item.questions_json ?? "",
+            });
+          } else {
+            addApprovalRef.current(conversationID, {
+              interruptId: item.interrupt_id,
+              callId: item.call_id ?? "",
+              tool: item.tool ?? "",
+              argsJson: item.args_json ?? "",
+            });
+          }
         }
       } catch (err) {
         if (!cancelled) console.error("[approval] load pending failed:", err);
@@ -737,6 +765,28 @@ export function useChatStream(
     [],
   );
 
+  // markQuestionAnswered 是 ask_user 版本：用户答完 → tool 卡从 pending 打
+  // 回 running（等真正 resume 后再 flip 到 ok / error）；取消 → 标 cancelled。
+  const markQuestionAnswered = useCallback(
+    (callId: string, cancelled: boolean) => {
+      if (!callId) return;
+      const status: ToolCall["status"] = cancelled ? "cancelled" : "running";
+      setTurns((prev) =>
+        prev.map((turn) => {
+          if (turn.role !== "assistant") return turn;
+          let changed = false;
+          const tools = turn.tools.map((tool) => {
+            if (tool.id !== callId) return tool;
+            changed = true;
+            return { ...tool, status };
+          });
+          return changed ? { ...turn, tools } : turn;
+        }),
+      );
+    },
+    [],
+  );
+
   // Reconnect to a freshly created SSE stream — used after an approval
   // decision, where the backend has spun up a new run into a new buffer
   // and the previous SSE connection has already closed. Continuation events
@@ -799,5 +849,6 @@ export function useChatStream(
     cancel,
     resume,
     markApprovalHandled,
+    markQuestionAnswered,
   };
 }

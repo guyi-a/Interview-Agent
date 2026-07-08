@@ -7,11 +7,13 @@ import { CodePreview } from "./renderers/CodePreview";
 import { TablePreview, isTablePath } from "./renderers/TablePreview";
 import { ImageRenderer } from "./renderers/ImageRenderer";
 import { PdfPreview } from "./renderers/PdfPreview";
+import { DocxPreview } from "./renderers/DocxPreview";
+import { PptxPreview } from "./renderers/PptxPreview";
 import { MediaPreview } from "./renderers/MediaPreview";
 import { UnsupportedRenderer } from "./renderers/UnsupportedRenderer";
 import { FileSwitcherOverlay } from "./FileSwitcherOverlay";
 
-type InlineKind = "pdf" | "video" | "audio";
+type InlineKind = "pdf" | "docx" | "pptx" | "video" | "audio";
 
 const VIDEO_EXTS = new Set(["mp4", "webm", "ogv", "mov", "mkv", "m4v"]);
 const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "m4a", "flac", "aac"]);
@@ -22,6 +24,8 @@ function detectInlineKind(path: string): InlineKind | null {
   if (dot < 0) return null;
   const ext = lower.slice(dot + 1);
   if (ext === "pdf") return "pdf";
+  if (ext === "docx") return "docx";
+  if (ext === "pptx") return "pptx";
   if (VIDEO_EXTS.has(ext)) return "video";
   if (AUDIO_EXTS.has(ext)) return "audio";
   return null;
@@ -118,6 +122,22 @@ export function FilePreview({
           <PdfPreview
             conversationId={conversationId}
             path={path}
+            projectId={projectId}
+          />
+        )}
+        {inlineKind === "docx" && (
+          <DocxPreview
+            conversationId={conversationId}
+            path={path}
+            name={basename(path)}
+            projectId={projectId}
+          />
+        )}
+        {inlineKind === "pptx" && (
+          <PptxPreview
+            conversationId={conversationId}
+            path={path}
+            name={basename(path)}
             projectId={projectId}
           />
         )}

@@ -177,22 +177,58 @@ export async function postApproval(
   return { handled: true };
 }
 
-export type PendingApprovalItem = {
+// 一条 pending 中断的通用契约。kind 为 "approval" 时 tool/args_json 有意义；
+// kind 为 "question" 时 questions_json 有意义（承载 hitl.Question 数组 JSON）。
+// 老版后端未升级 kind 字段时默认视为 approval。
+export type PendingInterruptItem = {
+  kind?: "approval" | "question";
   interrupt_id: string;
   call_id?: string;
   tool?: string;
   args_json?: string;
+  questions_json?: string;
 };
+
+export type PendingApprovalItem = PendingInterruptItem; // 名字保留兼容旧调用点
 
 export async function listPendingApprovals(
   conversationID: string,
-): Promise<PendingApprovalItem[]> {
+): Promise<PendingInterruptItem[]> {
   const res = await fetch(
     `${API_BASE}/conversations/${encodeURIComponent(conversationID)}/approvals/pending`,
   );
   if (!res.ok) throw new Error(`listPendingApprovals: ${res.status}`);
-  const data = (await res.json()) as { approvals?: PendingApprovalItem[] };
+  const data = (await res.json()) as { approvals?: PendingInterruptItem[] };
   return data.approvals ?? [];
+}
+
+// ask_user 恢复：一条用户对某个 pending question 的回复。cancelled=true 时
+// answers 允许空，服务端会把 Cancelled 标记传给工具体。
+export type QuestionAnswerPayload = {
+  cancelled?: boolean;
+  answers?: Array<{
+    question_id: string;
+    selected?: string[];
+    custom?: string;
+  }>;
+};
+
+export async function postQuestionAnswer(
+  conversationID: string,
+  interruptID: string,
+  payload: QuestionAnswerPayload,
+): Promise<{ handled: boolean }> {
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(conversationID)}/questions/${encodeURIComponent(interruptID)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (res.status === 404) return { handled: false };
+  if (!res.ok) throw new Error(`question ${res.status}`);
+  return { handled: true };
 }
 
 // The set of per-conversation approval modes. Kept in sync with backend

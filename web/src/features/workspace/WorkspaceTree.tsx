@@ -8,6 +8,33 @@ type TreeNode = {
   children: TreeNode[];
 };
 
+// 默认折叠的"重"目录：依赖 / 构建产物 / 缓存 / VCS，展开对用户没价值反而挡视线。
+// 补充规则：所有以 . 开头的目录也默认折叠（.qa/ .git/ .venv/ 等 Unix 隐藏目录约定）。
+const COLLAPSED_BY_DEFAULT = new Set([
+  "node_modules",
+  ".git",
+  ".svn",
+  ".hg",
+  "dist",
+  "build",
+  "out",
+  "target",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".cache",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".tox",
+  "coverage",
+  ".idea",
+  ".vscode",
+]);
+
 export function buildWorkspaceTree(entries: WorkspaceTreeEntry[]): TreeNode[] {
   const byPath = new Map<string, TreeNode>();
   const roots: TreeNode[] = [];
@@ -146,7 +173,11 @@ function TreeItem({
   depth: number;
   compact: boolean;
 }) {
-  const [open, setOpen] = useState(depth === 0);
+  const [open, setOpen] = useState(
+    depth === 0 &&
+      !COLLAPSED_BY_DEFAULT.has(node.entry.name) &&
+      !node.entry.name.startsWith("."),
+  );
   const previewPath = useWorkspaceStore((s) => s.previewPath);
   const openFile = useWorkspaceStore((s) => s.openFile);
   const isActive = previewPath === node.entry.path;

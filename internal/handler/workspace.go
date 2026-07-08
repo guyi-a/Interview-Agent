@@ -16,8 +16,14 @@ import (
 // with Content-Disposition: inline so the browser embeds them). Anything
 // outside this set is rejected — inline serving of arbitrary content
 // (especially html/svg/js) is a security hazard.
+//
+// docx / pptx 走这里是给前端的 docx-preview / pptx-renderer 拉 ArrayBuffer
+// 用的，虽然是 OOXML 二进制包（ZIP）但内容都是被前端解析，X-Content-Type-Options:
+// nosniff 挡住浏览器把它当 html 猜。
 var inlineMimeByExt = map[string]string{
 	".pdf":  "application/pdf",
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	".mp4":  "video/mp4",
 	".m4v":  "video/mp4",
 	".webm": "video/webm",

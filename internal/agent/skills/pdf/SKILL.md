@@ -36,6 +36,27 @@ description: "PDF 相关的所有操作：从零生成（reportlab / pypdf）、
 
 ## 转化：md/html → PDF（我们的核心能力）
 
+### 决定走哪条路：**必须**先用 ask_user 问一次
+
+md/html → PDF **总是**有"快速一发"和"精调 HTML"两种走法，agent 无法从技术层面替用户决定 —— **必须调 ask_user 让用户挑一次**，除非用户已经明说了偏好。
+
+```
+ask_user(questions=[{
+  "question": "PDF 样式偏好？",
+  "options": [
+    "精调样式，走 HTML 渲染，排版最好 (Recommended)",
+    "快速一发，pandoc 默认样式就够"
+  ]
+}])
+```
+
+推荐项是**精调**：HTML → Chromium 的排版质量明显高于 pandoc 默认（CSS 精调空间大、字体渲染细腻、可控 layout），除非用户明确要"快速临时看看"，都应该默认走 HTML。
+
+选"精调" → 路径 B（html→Chromium）
+选"快速" → 路径 A（pandoc）
+
+**不能跳过 ask_user**：即使你觉得"根据上下文能猜到用户想要精调"，也要问一次 —— PDF 是要交付的产物，用户对排版预期比 agent 猜测准。**唯一可跳过的情况**是用户在这条消息里已经写明了"快速一发 / 就要好看 / 用于投递 / 用于打印"这类明确信号，直接按信号走对应路径。
+
 ### 路径 A：pandoc 快速（默认样式）
 
 适用：**agent 判断"用户只是快速看看，不在意视觉设计"**。
