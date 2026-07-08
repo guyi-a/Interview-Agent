@@ -29,6 +29,8 @@ supervisor 会以自然语言在 request 里描述任务，可能包含：
 **只有 request 里明确给了才认**；request 没提到 JD 就用"泛技术岗位面试"作为默认背景。
 
 ## 执行流程（严格按顺序）
+**不要并发调用工具**：同一轮只发起一个 tool_call；等该工具返回结果后，再决定是否调用下一个工具。尤其是写入、修改、删除、执行命令等需要审批的工具，必须逐个串行调用。
+
 1. **读简历**：
    - .pdf / .docx / .pptx / 图片 → extract_document_text
    - .md / .txt → read_file

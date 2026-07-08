@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -17,10 +19,12 @@ type loadSkillInput struct {
 }
 
 type loadSkillOutput struct {
-	OK      bool   `json:"ok"`
-	Name    string `json:"name,omitempty"`
-	Body    string `json:"body,omitempty"`
-	Message string `json:"message,omitempty"`
+	OK          bool   `json:"ok"`
+	Name        string `json:"name,omitempty"`
+	Body        string `json:"body,omitempty"`
+	SkillPath   string `json:"skill_path,omitempty"`  // skill 目录在磁盘上的绝对路径
+	ScriptsPath string `json:"scripts_path,omitempty"` // <skill_path>/scripts，如果存在
+	Message     string `json:"message,omitempty"`
 }
 
 func newLoadSkillTool(loader *skills.Loader) (tool.BaseTool, error) {
@@ -28,9 +32,12 @@ func newLoadSkillTool(loader *skills.Loader) (tool.BaseTool, error) {
 		return nil, errors.New("load_skill: loader is nil")
 	}
 	names := loader.Names()
-	desc := "Load the full instruction body of a skill listed in the system prompt's Skills index. " +
+	desc := "Load a skill: returns its instruction body plus its on-disk directory path. " +
 		"Call this the moment a user request matches a skill's trigger description — its body carries the exact " +
 		"tool syntax, discipline, and failure recipes for that task. " +
+		"The skill directory may contain additional files (REFERENCE.md, FORMS.md, etc.) — read them with read_file as needed. " +
+		"If the skill has a scripts/ subdirectory, run its scripts via `run_command uv run <scripts_path>/xxx.py <args>`. " +
+		"Do NOT modify files inside the skill directory — copy to workspace/scripts/ first if you need to customize. " +
 		"Currently available: " + strings.Join(names, ", ") + "."
 	return utils.InferTool("load_skill", desc, func(ctx context.Context, in *loadSkillInput) (*loadSkillOutput, error) {
 		if in.Name == "" {
@@ -43,6 +50,16 @@ func newLoadSkillTool(loader *skills.Loader) (tool.BaseTool, error) {
 				Message: fmt.Sprintf("skill %q not found; available: %s", in.Name, strings.Join(names, ", ")),
 			}, nil
 		}
-		return &loadSkillOutput{OK: true, Name: s.Name, Body: s.Body}, nil
+		out := &loadSkillOutput{
+			OK:        true,
+			Name:      s.Name,
+			Body:      s.Body,
+			SkillPath: s.Path,
+		}
+		scriptsDir := filepath.Join(s.Path, "scripts")
+		if fi, err := os.Stat(scriptsDir); err == nil && fi.IsDir() {
+			out.ScriptsPath = scriptsDir
+		}
+		return out, nil
 	})
 }

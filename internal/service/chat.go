@@ -142,6 +142,16 @@ func (s *ChatService) Resume(convID, interruptID string, dec approval.Decision) 
 		return false, nil
 	}
 
+	// The user has answered this approval, so the conversation is no longer
+	// waiting on this interrupt. If no sibling approvals remain, flip the
+	// sidebar state back to running immediately instead of leaving the
+	// waiting_approval pill visible until the resumed run fully drains.
+	status := "running"
+	if s.pending.HasPending(convID) {
+		status = "waiting_approval"
+	}
+	_ = s.convRepo.SetAgentStatus(context.Background(), convID, status)
+
 	// The previous SSE buffer was Finish()ed when the interrupt drained the
 	// iterator, so a resumed run can't Append into it. Replace with a fresh
 	// buffer — the frontend will GET /chat/:id to reconnect and drain it.

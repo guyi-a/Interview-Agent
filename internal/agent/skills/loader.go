@@ -11,47 +11,82 @@
 //
 // The system prompt only carries the (name, description) index — the body
 // is fetched on demand by the load_skill tool.
+//
+// 除了 SKILL.md 之外，一个 skill 目录可以放辅助文件（REFERENCE.md / FORMS.md
+// 之类），以及 scripts/ 子目录里放 agent 可直接执行的 python 脚本。整个 skill
+// 目录在启动时释放到磁盘（默认 <dataDir>/skills/builtin/<name>/），agent 通过
+// read_file / run_command 访问这些辅助文件和脚本。
 package skills
 
 import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
-//go:embed all:*/SKILL.md
+//go:embed all:*
 var skillsFS embed.FS
 
 type Skill struct {
 	Name        string
 	Description string
 	Body        string
+	// Path 是 skill 目录在磁盘上的绝对路径（<dataDir>/skills/builtin/<name>）。
+	// agent 用这个路径去 read 辅助文件 或 run_command uv run <path>/scripts/xxx.py。
+	Path string
 }
 
 type Loader struct {
-	skills map[string]Skill
+	skills   map[string]Skill
+	rootPath string // <dataDir>/skills/builtin
 }
 
-// NewLoader scans the embedded skills directory once at boot and returns a
-// registry keyed by frontmatter name.
-func NewLoader() (*Loader, error) {
-	entries, err := fs.ReadDir(skillsFS, ".")
+// NewLoader 释放 embed 内容到 dataDir/skills/builtin，然后扫每个子目录里的
+// SKILL.md 建索引。每次启动会**清空** builtin 目录再重建，避免旧脚本残留。
+// dataDir 为空时走当前工作目录下的 data/。
+func NewLoader(dataDir string) (*Loader, error) {
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	rootPath, err := filepath.Abs(filepath.Join(dataDir, "skills", "builtin"))
 	if err != nil {
-		return nil, fmt.Errorf("skills: read root: %w", err)
+		return nil, fmt.Errorf("skills: resolve root: %w", err)
+	}
+
+	if err := os.RemoveAll(rootPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("skills: clean %s: %w", rootPath, err)
+	}
+	if err := os.MkdirAll(rootPath, 0o755); err != nil {
+		return nil, fmt.Errorf("skills: mkdir %s: %w", rootPath, err)
+	}
+	if err := extractEmbed(skillsFS, rootPath); err != nil {
+		return nil, fmt.Errorf("skills: extract: %w", err)
 	}
 
 	out := map[string]Skill{}
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("skills: read root: %w", err)
+	}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		mdPath := e.Name() + "/SKILL.md"
-		raw, err := fs.ReadFile(skillsFS, mdPath)
+		skillDir := filepath.Join(rootPath, e.Name())
+		mdPath := filepath.Join(skillDir, "SKILL.md")
+		raw, err := os.ReadFile(mdPath)
 		if err != nil {
-			continue
+			// 子目录里没有 SKILL.md 就跳过（不当作错误 —— 便于放非 skill 的辅助目录）
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("skills: read %s: %w", mdPath, err)
 		}
 		sk, err := parseSkill(string(raw))
 		if err != nil {
@@ -63,10 +98,14 @@ func NewLoader() (*Loader, error) {
 		if _, dup := out[sk.Name]; dup {
 			return nil, fmt.Errorf("skills: duplicate name %q", sk.Name)
 		}
+		sk.Path = skillDir
 		out[sk.Name] = sk
 	}
-	return &Loader{skills: out}, nil
+	return &Loader{skills: out, rootPath: rootPath}, nil
 }
+
+// RootPath 返回 skill 目录在磁盘上的绝对路径。用于诊断和 UI 展示。
+func (l *Loader) RootPath() string { return l.rootPath }
 
 // Index returns the (name, description) list sorted alphabetically by name.
 // Callers stitch it into the system prompt so the LLM knows what skills are
@@ -85,7 +124,7 @@ func (l *Loader) Index() []Skill {
 	return out
 }
 
-// Load returns the full SKILL.md body for the given name.
+// Load returns the full SKILL.md body for the given name (with Path filled).
 func (l *Loader) Load(name string) (Skill, error) {
 	s, ok := l.skills[name]
 	if !ok {
@@ -105,6 +144,46 @@ func (l *Loader) Names() []string {
 }
 
 var ErrNotFound = errors.New("skill not found")
+
+// extractEmbed 把 embed.FS 里的所有文件递归复制到 dst 目录。保留原目录结构。
+// 权限：目录 0755，文件按扩展名决定 —— .py / .sh 给 0755（可执行），其他 0644。
+func extractEmbed(src embed.FS, dst string) error {
+	return fs.WalkDir(src, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == "." {
+			return nil
+		}
+		// 跳过 loader.go 本身（跟 SKILL.md 一起在 embed 根，但不是 skill 内容）
+		if !d.IsDir() && filepath.Dir(path) == "." {
+			return nil
+		}
+		target := filepath.Join(dst, path)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		in, err := src.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		mode := os.FileMode(0o644)
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".py", ".sh":
+			mode = 0o755
+		}
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		return out.Close()
+	})
+}
 
 // parseSkill splits a SKILL.md string into its YAML frontmatter and body.
 // Only name and description keys are recognised; nothing fancier because

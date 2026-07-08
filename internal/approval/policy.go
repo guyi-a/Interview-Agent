@@ -19,7 +19,7 @@ import (
 // (mkdir, create_workspace) run without prompting.
 func NeedsApproval(name, argsJSON string) bool {
 	switch name {
-	case "write_file", "edit_file":
+	case "write_file", "edit_file", "edit_file_lines", "rm", "mv", "run_command":
 		return true
 	case "write_file_chunked":
 		return chunkedMode(argsJSON) == "start"

@@ -56,7 +56,15 @@ export function Conversation() {
     refreshProjects();
   }, [refreshConvs, refreshProjects]);
 
-  const { turns, loading, streaming, send, cancel, resume } = useChatStream(id, {
+  const {
+    turns,
+    loading,
+    streaming,
+    send,
+    cancel,
+    resume,
+    markApprovalHandled,
+  } = useChatStream(id, {
     onProjectBound,
     projectId,
   });
@@ -101,10 +109,16 @@ export function Conversation() {
     [id, addAttachments],
   );
 
-  // After the user answers an approval, the backend spins up a new run and
-  // we reconnect to it via resume(). When that run drains, refresh the
-  // sidebar so the "等待审批" pill drops (or stays, if another interrupt
-  // fired) and updated_at reflects the new activity.
+  // After the user answers an approval, refresh the sidebar immediately so
+  // the "等待审批" pill reflects that the interrupt was handled. The resumed
+  // stream will refresh again when it drains for the final idle / next-pending
+  // state.
+  const onApprovalDecision = useCallback(async (item: { callId: string }, decision: "approve" | "deny") => {
+    markApprovalHandled(item.callId, decision);
+    refreshConvs();
+    refreshProjects();
+  }, [markApprovalHandled, refreshConvs, refreshProjects]);
+
   const onApprovalResume = useCallback(async () => {
     await resume();
     refreshConvs();
@@ -149,7 +163,11 @@ export function Conversation() {
               rightActions={<ApprovalModeDropdown conversationID={id} />}
               onImageFiles={onImageFiles}
             />
-            <ApprovalBar conversationID={id} onResume={onApprovalResume} />
+            <ApprovalBar
+              conversationID={id}
+              onDecision={onApprovalDecision}
+              onResume={onApprovalResume}
+            />
           </div>
         </div>
         <WorkspacePanel streaming={streaming} projectId={projectId} />

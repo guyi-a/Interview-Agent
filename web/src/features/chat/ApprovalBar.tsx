@@ -12,7 +12,11 @@ const EMPTY: PendingApproval[] = [];
 const TOOL_TITLES: Record<string, string> = {
   write_file: "写入文件",
   edit_file: "修改文件",
+  edit_file_lines: "按行修改文件",
   write_file_chunked: "写入长文件",
+  rm: "删除",
+  mv: "移动 / 重命名",
+  run_command: "执行命令",
 };
 
 const REASON_MAX = 500;
@@ -32,10 +36,34 @@ function summarize(tool: string, argsJson: string): string {
     case "write_file":
     case "edit_file":
       return typeof args.path === "string" ? args.path : "";
+    case "edit_file_lines": {
+      const path = typeof args.path === "string" ? args.path : "";
+      const start = typeof args.start_line === "number" ? args.start_line : undefined;
+      const end = typeof args.end_line === "number" ? args.end_line : undefined;
+      if (path && start !== undefined && end !== undefined) {
+        return `${path} · L${start}-${end}`;
+      }
+      return path;
+    }
     case "write_file_chunked": {
       const path = typeof args.path === "string" ? args.path : "";
       const mode = typeof args.mode === "string" ? args.mode : "";
       return path && mode ? `${path} · ${mode}` : path || mode;
+    }
+    case "rm": {
+      const path = typeof args.path === "string" ? args.path : "";
+      const recursive = args.recursive === true;
+      return recursive ? `${path} · recursive` : path;
+    }
+    case "mv": {
+      const src = typeof args.src === "string" ? args.src : "";
+      const dst = typeof args.dst === "string" ? args.dst : "";
+      return src && dst ? `${src} → ${dst}` : src || dst;
+    }
+    case "run_command": {
+      const cmd = typeof args.command === "string" ? args.command : "";
+      const cwd = typeof args.cwd === "string" ? args.cwd : "";
+      return cwd ? `${cmd} · cwd=${cwd}` : cmd;
     }
     default: {
       // Best-effort fallback: any path-ish field
@@ -54,9 +82,14 @@ function toolTitle(tool: string): string {
 
 export function ApprovalBar({
   conversationID,
+  onDecision,
   onResume,
 }: {
   conversationID: string;
+  onDecision?: (
+    item: PendingApproval,
+    decision: "approve" | "deny",
+  ) => Promise<void> | void;
   onResume?: () => Promise<void> | void;
 }) {
   const pending = useApprovalStore(
@@ -94,6 +127,7 @@ export function ApprovalBar({
     setBusy(true);
     try {
       await decide(conversationID, current.interruptId, decision, withReason);
+      await onDecision?.(current, decision);
       // Backend spun up a fresh run into a new SSE buffer; reconnect so the
       // continuation streams into the same conversation view.
       await onResume?.();

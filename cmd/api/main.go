@@ -106,10 +106,11 @@ func main() {
 
 	bridgeSvc := browserbridge.NewService(browserbridge.NewRegistry())
 
-	skillLoader, err := skills.NewLoader()
+	skillLoader, err := skills.NewLoader(filepath.Dir(dbPath))
 	if err != nil {
 		log.Fatalf("skills.NewLoader: %v", err)
 	}
+	log.Printf("skills: 释放到 %s", skillLoader.RootPath())
 
 	ts, err := tools.Builtin(ctx, tools.Deps{
 		WorkspaceRoot:    absWorkspaceRoot,

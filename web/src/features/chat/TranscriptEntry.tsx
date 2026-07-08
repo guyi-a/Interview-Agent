@@ -679,6 +679,16 @@ function prettyJson(v: unknown): string {
 function toolArgLabel(v: unknown): string {
   if (!v || typeof v !== "object" || Array.isArray(v)) return "";
   const args = v as Record<string, unknown>;
+  // run_command 的 command 直接展示，不走 basename（命令行不是路径）。
+  // CSS 的 truncate + title 属性会处理长命令。
+  const command = args.command;
+  if (typeof command === "string" && command) return command;
+  // mv / cp 的 src → dst 组合。
+  const src = args.src;
+  const dst = args.dst;
+  if (typeof src === "string" && src && typeof dst === "string" && dst) {
+    return `${basename(src)} → ${basename(dst)}`;
+  }
   for (const key of ["path", "file_path", "filepath", "target_path", "target", "output_path"]) {
     const value = args[key];
     if (typeof value === "string" && value) return basename(value);

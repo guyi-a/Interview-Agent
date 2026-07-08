@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -98,7 +99,7 @@ func suggestedToolFor(kind string) string {
 		return "list_files"
 	case "text", "markdown", "code", "csv", "ipynb":
 		return "read_file"
-	case "pdf", "docx":
+	case "pdf", "docx", "pptx", "image":
 		return "extract_document_text"
 	default:
 		return "no_reader_available"
@@ -187,20 +188,36 @@ func newListFilesTool(d *fsDeps) (tool.BaseTool, error) {
 // --- read_file ---
 
 type ReadFileInput struct {
-	Path string `json:"path" jsonschema:"description=File path to read. Either an absolute local path (any location on the user's machine) or relative to the current workspace root."`
+	Path   string `json:"path" jsonschema:"description=File path to read. Either an absolute local path (any location on the user's machine) or relative to the current workspace root."`
+	Offset int64  `json:"offset" jsonschema:"description=Byte offset to start reading from. Default 0 (start of file). Use next_offset from a previous truncated call to continue reading."`
+	Limit  int    `json:"limit" jsonschema:"description=Max bytes to read this call. 0 or unset = use default (256 KiB). Values above 262144 are clamped down. Ask for less when you only need a peek."`
 }
 
 type ReadFileOutput struct {
-	Path      string `json:"path"`
-	Content   string `json:"content"`
-	Truncated bool   `json:"truncated,omitempty"`
-	SizeBytes int64  `json:"size_bytes"`
+	Path       string `json:"path"`
+	Content    string `json:"content"`
+	Offset     int64  `json:"offset"`
+	BytesRead  int    `json:"bytes_read"`
+	NextOffset int64  `json:"next_offset"`             // where to resume; equals size when eof
+	EOF        bool   `json:"eof"`                     // true if this read reached end of file
+	Truncated  bool   `json:"truncated,omitempty"`     // legacy alias: content ends before EOF because limit was hit
+	SizeBytes  int64  `json:"size_bytes"`
 }
 
 func newReadFileTool(d *fsDeps) (tool.BaseTool, error) {
 	fn := func(ctx context.Context, in *ReadFileInput) (*ReadFileOutput, error) {
 		if in.Path == "" {
 			return nil, fmt.Errorf("path is required")
+		}
+		if in.Offset < 0 {
+			return nil, fmt.Errorf("offset must be >= 0")
+		}
+		if in.Limit < 0 {
+			return nil, fmt.Errorf("limit must be >= 0")
+		}
+		limit := in.Limit
+		if limit == 0 || limit > maxReadBytes {
+			limit = maxReadBytes
 		}
 		// Relative paths still need a workspace; absolute paths bypass the
 		// workspace-required check. resolveWorkspace's error is only fatal
@@ -220,53 +237,67 @@ func newReadFileTool(d *fsDeps) (tool.BaseTool, error) {
 		if st.IsDir() {
 			return nil, fmt.Errorf("%q is a directory; use list_files instead", in.Path)
 		}
+		size := st.Size()
+		if in.Offset > size {
+			return nil, fmt.Errorf("offset %d exceeds file size %d", in.Offset, size)
+		}
 		f, err := os.Open(abs)
 		if err != nil {
 			return nil, fmt.Errorf("open: %w", err)
 		}
 		defer f.Close()
-		buf := make([]byte, maxReadBytes+1)
-		n, err := f.Read(buf)
-		if err != nil && n == 0 {
+		if in.Offset > 0 {
+			if _, err := f.Seek(in.Offset, 0); err != nil {
+				return nil, fmt.Errorf("seek: %w", err)
+			}
+		}
+		buf := make([]byte, limit)
+		n, err := io.ReadFull(f, buf)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return nil, fmt.Errorf("read: %w", err)
 		}
-		// Binary reject — don't return garbage. Sniff the first N bytes and
-		// bail with a kind-aware suggestion so the agent can pick another
-		// tool (extract_document_text for pdf/docx, etc.) instead of dumping
-		// mojibake into context.
-		sniffLen := n
-		if sniffLen > binarySniffSize {
-			sniffLen = binarySniffSize
-		}
-		if hasNullByte(buf[:sniffLen]) {
-			kind := classifyByExt(strings.ToLower(filepath.Ext(abs)))
-			suggest := suggestedToolFor(kind)
-			if suggest == "read_file" || suggest == "no_reader_available" {
+		// Binary reject — only enforced for a fresh read from the head. When
+		// the agent explicitly seeks past 0, we trust the intent (may be
+		// continuing a previous truncated read, or slicing a known file).
+		if in.Offset == 0 {
+			sniffLen := n
+			if sniffLen > binarySniffSize {
+				sniffLen = binarySniffSize
+			}
+			if hasNullByte(buf[:sniffLen]) {
+				kind := classifyByExt(strings.ToLower(filepath.Ext(abs)))
+				suggest := suggestedToolFor(kind)
+				if suggest == "read_file" || suggest == "no_reader_available" {
+					return nil, fmt.Errorf(
+						"file %q appears to be binary (kind=%s); call file_info for details, no supported text reader for this type",
+						in.Path, kind,
+					)
+				}
 				return nil, fmt.Errorf(
-					"file %q appears to be binary (kind=%s); call file_info for details, no supported text reader for this type",
-					in.Path, kind,
+					"file %q appears to be binary (kind=%s); use %s instead",
+					in.Path, kind, suggest,
 				)
 			}
-			return nil, fmt.Errorf(
-				"file %q appears to be binary (kind=%s); use %s instead",
-				in.Path, kind, suggest,
-			)
 		}
-		truncated := false
-		if n > maxReadBytes {
-			n = maxReadBytes
-			truncated = true
-		}
+		next := in.Offset + int64(n)
+		eof := next >= size
 		return &ReadFileOutput{
-			Path:      abs,
-			Content:   string(buf[:n]),
-			Truncated: truncated,
-			SizeBytes: st.Size(),
+			Path:       abs,
+			Content:    string(buf[:n]),
+			Offset:     in.Offset,
+			BytesRead:  n,
+			NextOffset: next,
+			EOF:        eof,
+			Truncated:  !eof,
+			SizeBytes:  size,
 		}, nil
 	}
 	return utils.InferTool(
 		"read_file",
-		fmt.Sprintf("Read a UTF-8 text file. Accepts an absolute local path (anywhere on the user's machine) or a workspace-relative path. Rejects binary files with a hint at the right tool (call file_info first if unsure). Returns full content (truncated at %d KiB; check 'truncated').", maxReadBytes/1024),
+		fmt.Sprintf(
+			"Read a UTF-8 text slice from a file. Accepts an absolute local path (anywhere on the user's machine) or a workspace-relative path. Reads at most %d KiB per call — for larger files, pass offset (bytes) to continue where the previous call ended (use next_offset). Set limit to cap this call's read size. Rejects binary files (only on offset=0). Returns { content, offset, bytes_read, next_offset, eof, size_bytes }.",
+			maxReadBytes/1024,
+		),
 		fn,
 	)
 }
@@ -428,16 +459,18 @@ func newWriteFileTool(d *fsDeps) (tool.BaseTool, error) {
 // --- edit_file ---
 
 type EditFileInput struct {
-	Path      string `json:"path" jsonschema:"description=File path to edit. Relative to workspace root."`
-	OldString string `json:"old_string" jsonschema:"description=Exact text to find. Must appear EXACTLY ONCE in the file (otherwise the edit is rejected). Include enough surrounding context to disambiguate."`
-	NewString string `json:"new_string" jsonschema:"description=Replacement text. Use empty string to delete the matched region."`
+	Path       string `json:"path" jsonschema:"description=File path to edit. Relative to workspace root."`
+	OldString  string `json:"old_string" jsonschema:"description=Exact text to find. Must appear EXACTLY ONCE in the file when replace_all=false (otherwise the edit is rejected — add more surrounding context to make the match unique). When replace_all=true, may match multiple times."`
+	NewString  string `json:"new_string" jsonschema:"description=Replacement text. Use empty string to delete the matched region."`
+	ReplaceAll bool   `json:"replace_all" jsonschema:"description=If true, replace every occurrence of old_string. If false (default), require old_string to appear exactly once."`
 }
 
 type EditFileOutput struct {
 	Path           string `json:"path"`
 	BytesBefore    int    `json:"bytes_before"`
 	BytesAfter     int    `json:"bytes_after"`
-	OccurrenceLine int    `json:"occurrence_line"` // 1-based line where the match started
+	Replacements   int    `json:"replacements"`              // number of occurrences replaced
+	OccurrenceLine int    `json:"occurrence_line,omitempty"` // 1-based line of the first match (single-replace mode only)
 }
 
 func newEditFileTool(d *fsDeps) (tool.BaseTool, error) {
@@ -468,12 +501,19 @@ func newEditFileTool(d *fsDeps) (tool.BaseTool, error) {
 		if count == 0 {
 			return nil, fmt.Errorf("old_string not found in %q", in.Path)
 		}
-		if count > 1 {
-			return nil, fmt.Errorf("old_string matches %d locations in %q; add more surrounding context to make it unique", count, in.Path)
+
+		var out string
+		var firstLine int
+		if in.ReplaceAll {
+			out = strings.ReplaceAll(content, in.OldString, in.NewString)
+		} else {
+			if count > 1 {
+				return nil, fmt.Errorf("old_string matches %d locations in %q; add more surrounding context to make it unique, or pass replace_all=true to change all", count, in.Path)
+			}
+			idx := strings.Index(content, in.OldString)
+			firstLine = 1 + strings.Count(content[:idx], "\n")
+			out = content[:idx] + in.NewString + content[idx+len(in.OldString):]
 		}
-		idx := strings.Index(content, in.OldString)
-		line := 1 + strings.Count(content[:idx], "\n")
-		out := content[:idx] + in.NewString + content[idx+len(in.OldString):]
 		if len(out) > maxWriteBytes {
 			return nil, fmt.Errorf("resulting file too large: %d bytes (max %d)", len(out), maxWriteBytes)
 		}
@@ -484,12 +524,103 @@ func newEditFileTool(d *fsDeps) (tool.BaseTool, error) {
 			Path:           abs,
 			BytesBefore:    len(raw),
 			BytesAfter:     len(out),
-			OccurrenceLine: line,
+			Replacements:   count,
+			OccurrenceLine: firstLine,
 		}, nil
 	}
 	return utils.InferTool(
 		"edit_file",
-		"Make a targeted in-place edit by replacing one exact text occurrence with another. old_string must appear EXACTLY ONCE in the file — include enough surrounding context to make the match unique. Use empty new_string to delete. Preferred over write_file for partial changes.",
+		"Make an in-place edit by replacing exact text. In default mode (replace_all=false) old_string must appear EXACTLY ONCE — include enough surrounding context to make the match unique. Pass replace_all=true to replace every occurrence at once (returns the count). Use empty new_string to delete. Preferred over write_file for partial changes.",
+		fn,
+	)
+}
+
+// --- edit_file_lines ---
+
+type EditFileLinesInput struct {
+	Path       string `json:"path" jsonschema:"description=File path to edit. Relative to workspace root."`
+	StartLine  int    `json:"start_line" jsonschema:"description=1-based line number where the replacement begins (inclusive)."`
+	EndLine    int    `json:"end_line" jsonschema:"description=1-based line number where the replacement ends (inclusive). Must be >= start_line. To replace one line, set end_line = start_line."`
+	NewContent string `json:"new_content" jsonschema:"description=Text to put in place of lines [start_line, end_line]. Use empty string to delete the range. Interior newlines are preserved; a trailing newline is added automatically when needed to keep the file well-formed."`
+}
+
+type EditFileLinesOutput struct {
+	Path         string `json:"path"`
+	BytesBefore  int    `json:"bytes_before"`
+	BytesAfter   int    `json:"bytes_after"`
+	LinesRemoved int    `json:"lines_removed"`
+	StartLine    int    `json:"start_line"`
+	EndLine      int    `json:"end_line"`
+}
+
+func newEditFileLinesTool(d *fsDeps) (tool.BaseTool, error) {
+	fn := func(ctx context.Context, in *EditFileLinesInput) (*EditFileLinesOutput, error) {
+		if in.Path == "" {
+			return nil, fmt.Errorf("path is required")
+		}
+		if in.StartLine < 1 {
+			return nil, fmt.Errorf("start_line must be >= 1")
+		}
+		if in.EndLine < in.StartLine {
+			return nil, fmt.Errorf("end_line (%d) must be >= start_line (%d)", in.EndLine, in.StartLine)
+		}
+		ws, err := d.resolveWorkspace(ctx)
+		if err != nil {
+			return nil, err
+		}
+		abs, err := scope.Resolve(ws, in.Path)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := os.ReadFile(abs)
+		if err != nil {
+			return nil, fmt.Errorf("read file: %w", err)
+		}
+		content := string(raw)
+		if content == "" {
+			return nil, fmt.Errorf("file %q is empty; use write_file instead", in.Path)
+		}
+		lines := strings.SplitAfter(content, "\n")
+		// Trailing empty element appears when content ends with "\n"; drop it
+		// so total == real line count.
+		if lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		total := len(lines)
+		if in.StartLine > total {
+			return nil, fmt.Errorf("start_line %d exceeds file line count %d", in.StartLine, total)
+		}
+		if in.EndLine > total {
+			return nil, fmt.Errorf("end_line %d exceeds file line count %d", in.EndLine, total)
+		}
+		before := strings.Join(lines[:in.StartLine-1], "")
+		after := strings.Join(lines[in.EndLine:], "")
+		nc := in.NewContent
+		// Keep file well-formed: if we still have content after the replaced
+		// range, ensure the injected block ends with a newline so `after`
+		// doesn't fuse onto its last line.
+		if nc != "" && len(after) > 0 && !strings.HasSuffix(nc, "\n") {
+			nc += "\n"
+		}
+		out := before + nc + after
+		if len(out) > maxWriteBytes {
+			return nil, fmt.Errorf("resulting file too large: %d bytes (max %d)", len(out), maxWriteBytes)
+		}
+		if err := os.WriteFile(abs, []byte(out), 0o644); err != nil {
+			return nil, fmt.Errorf("write file: %w", err)
+		}
+		return &EditFileLinesOutput{
+			Path:         abs,
+			BytesBefore:  len(raw),
+			BytesAfter:   len(out),
+			LinesRemoved: in.EndLine - in.StartLine + 1,
+			StartLine:    in.StartLine,
+			EndLine:      in.EndLine,
+		}, nil
+	}
+	return utils.InferTool(
+		"edit_file_lines",
+		"Replace a contiguous line range [start_line, end_line] (1-based, inclusive) with new_content. Use when you know the exact line numbers (e.g. from grep output or a previous read_file). Empty new_content deletes the range. To insert lines, first read_file to find an anchor and use edit_file with old_string set to that anchor — this tool does NOT do pure insertions.",
 		fn,
 	)
 }

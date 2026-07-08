@@ -143,14 +143,29 @@ function isCancelledToolResult(content?: string, error?: string): boolean {
   );
 }
 
+function commandExitCode(content?: string): number | undefined {
+  if (!content) return undefined;
+  try {
+    const parsed = JSON.parse(content) as { exit_code?: unknown };
+    return typeof parsed.exit_code === "number" ? parsed.exit_code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeToolStatus(
   status: "pending" | "running" | "ok" | "error" | "cancelled" | undefined,
   ok: boolean | undefined,
   content?: string,
   error?: string,
+  toolName?: string,
 ): ToolCall["status"] {
   if (status === "cancelled" || isCancelledToolResult(content, error)) {
     return "cancelled";
+  }
+  if (toolName === "run_command") {
+    const exitCode = commandExitCode(content);
+    if (exitCode !== undefined && exitCode !== 0) return "error";
   }
   if (status) return status;
   return ok ? "ok" : "error";
@@ -168,7 +183,7 @@ function fromPersisted(rows: PersistedMessage[]): ChatTurn[] {
         id: t.id,
         name: t.name,
         argsJson: t.args_json ?? "",
-        status: normalizeToolStatus(t.status, t.ok, t.content, t.error),
+        status: normalizeToolStatus(t.status, t.ok, t.content, t.error, t.name),
         content: t.content,
         error: t.error,
       })),
@@ -310,6 +325,7 @@ async function runSSELoop(
               f.ok,
               f.content,
               f.error ?? f.message,
+              f.name,
             );
             upsertTool(f.id, {
               name: f.name ?? undefined,
@@ -546,7 +562,8 @@ export function useChatStream(
         return;
       }
       if (cancelled) return;
-      setTurns(fromPersisted(rows));
+      const initialTurns = fromPersisted(rows);
+      setTurns(initialTurns);
 
       try {
         const approvals = await listPendingApprovals(conversationID);
@@ -580,21 +597,42 @@ export function useChatStream(
       }
       if (cancelled || !res) return;
 
-      const nowIso = new Date().toISOString();
-      const assistantTurn: ChatTurn = {
-        id: `a-resume-${nowIso}`,
-        role: "assistant",
-        content: "",
-        reasoning: "",
-        tools: [],
-        subEvents: [],
-        createdAt: nowIso,
-        done: false,
-      };
-      setTurns((prev) => [...prev, assistantTurn]);
+      const existingTurn = [...initialTurns]
+        .reverse()
+        .find(
+          (t) =>
+            t.role === "assistant" &&
+            t.tools.some(
+              (tool) => tool.status === "pending" || tool.status === "running",
+            ),
+        );
+
+      let targetId: string;
+      if (existingTurn) {
+        targetId = existingTurn.id;
+        setTurns((prev) =>
+          prev.map((t) =>
+            t.id === targetId ? { ...t, done: false, error: undefined } : t,
+          ),
+        );
+      } else {
+        const nowIso = new Date().toISOString();
+        const assistantTurn: ChatTurn = {
+          id: `a-resume-${nowIso}`,
+          role: "assistant",
+          content: "",
+          reasoning: "",
+          tools: [],
+          subEvents: [],
+          createdAt: nowIso,
+          done: false,
+        };
+        targetId = assistantTurn.id;
+        setTurns((prev) => [...prev, assistantTurn]);
+      }
       setStreaming(true);
       abortRef.current = controller;
-      await runStreamingResponse(res, assistantTurn.id, controller);
+      await runStreamingResponse(res, targetId, controller);
     })();
 
     return () => {
@@ -678,6 +716,27 @@ export function useChatStream(
     await cancelChat(conversationID);
   }, [conversationID]);
 
+  const markApprovalHandled = useCallback(
+    (callId: string, decision: "approve" | "deny") => {
+      if (!callId) return;
+      const status: ToolCall["status"] =
+        decision === "approve" ? "running" : "cancelled";
+      setTurns((prev) =>
+        prev.map((turn) => {
+          if (turn.role !== "assistant") return turn;
+          let changed = false;
+          const tools = turn.tools.map((tool) => {
+            if (tool.id !== callId) return tool;
+            changed = true;
+            return { ...tool, status };
+          });
+          return changed ? { ...turn, tools } : turn;
+        }),
+      );
+    },
+    [],
+  );
+
   // Reconnect to a freshly created SSE stream — used after an approval
   // decision, where the backend has spun up a new run into a new buffer
   // and the previous SSE connection has already closed. Continuation events
@@ -731,5 +790,14 @@ export function useChatStream(
     await runStreamingResponse(res, targetId, controller);
   }, [conversationID, streaming, runStreamingResponse]);
 
-  return { turns, loading, streaming, error, send, cancel, resume };
+  return {
+    turns,
+    loading,
+    streaming,
+    error,
+    send,
+    cancel,
+    resume,
+    markApprovalHandled,
+  };
 }

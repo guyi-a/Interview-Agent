@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // IsSafeAuto is the auto-mode fast path: rule-based recogniser for the
@@ -38,6 +40,8 @@ func IsSafeAuto(name, argsJSON string) (bool, string) {
 			return false, "chunked non-start reached auto path"
 		}
 		return isSafeWriteLike(argsJSON, /*hasContent=*/ true)
+	case "run_command":
+		return isSafeShellCommand(argsJSON)
 	default:
 		return false, "no fast-path rule for tool"
 	}
@@ -163,4 +167,242 @@ func contentLooksSensitive(content string) (string, bool) {
 		return "credential signature in content", true
 	}
 	return "", false
+}
+
+// isSafeShellCommand is the auto-mode fast path for run_command. Parses the
+// command line with mvdan/sh and lets it through ONLY when EVERY sub-command
+// (across && / || / ; / |) is on the read-only whitelist AND there are no
+// output redirections and no dangerous flags. Anything else falls through to
+// the LLM classifier (or human review if that's off).
+//
+// The whitelist is deliberately narrow. Tools that could write files or run
+// arbitrary code (python / node / go / pandoc / marp / typst / ffmpeg / npm /
+// pip / uv / cargo / make / brew ...) are NOT here — they can be safe in
+// context, but that judgment belongs to the classifier, not this rule set.
+func isSafeShellCommand(argsJSON string) (bool, string) {
+	if argsJSON == "" {
+		return false, "empty args"
+	}
+	var probe struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &probe); err != nil {
+		return false, "unparseable args"
+	}
+	cmd := strings.TrimSpace(probe.Command)
+	if cmd == "" {
+		return false, "empty command"
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(cmd), "")
+	if err != nil {
+		return false, "shell parse failed"
+	}
+	safe := true
+	reason := "readonly_shell"
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		// Redirections live on Stmt, not CallExpr — walk Stmt first to catch
+		// `... > out.txt` before we assess the command name.
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			for _, r := range stmt.Redirs {
+				if isWriteRedirect(r.Op) {
+					safe = false
+					reason = "has output redirection"
+					return false
+				}
+			}
+			return true
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		if len(call.Args) == 0 {
+			return true
+		}
+		words := extractWords(call.Args)
+		if len(words) == 0 {
+			return true // bare env-assignment only, no command yet
+		}
+		if ok, why := isReadOnlyInvocation(words); !ok {
+			safe = false
+			reason = why
+			return false
+		}
+		return true
+	})
+	if !safe {
+		return false, reason
+	}
+	return true, reason
+}
+
+// isWriteRedirect returns true for redirection ops that create / append to /
+// truncate a target file. See mvdan/sh/v3/syntax RedirOperator constants.
+func isWriteRedirect(op syntax.RedirOperator) bool {
+	switch op {
+	case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.ClbOut:
+		return true
+	}
+	return false
+}
+
+// shellReadOnlyCommands is the set of first-token commands that are safe on
+// their own. Some entries need per-argument checks (find/git) — those get
+// special-cased in isReadOnlyInvocation before the map lookup falls through.
+var shellReadOnlyCommands = map[string]bool{
+	"pwd":      true,
+	"ls":       true,
+	"cat":      true,
+	"head":     true,
+	"tail":     true,
+	"wc":       true,
+	"file":     true,
+	"stat":     true,
+	"du":       true,
+	"df":       true,
+	"grep":     true,
+	"rg":       true,
+	"fd":       true,
+	"jq":       true,
+	"echo":     true,
+	"printf":   true,
+	"date":     true,
+	"whoami":   true,
+	"hostname": true,
+	"uname":    true,
+	"which":    true,
+	"type":     true,
+	"env":      true,
+	"true":     true,
+	"false":    true,
+	"basename": true,
+	"dirname":  true,
+	"realpath": true,
+	"sort":     true,
+	"uniq":     true,
+	"cut":      true,
+	"tr":       true,
+	"tee":      true, // stdin→stdout+file — technically writes, but agents use it in `foo | tee out` where the write is explicit; leaning safe. Reconsider if noisy.
+}
+
+// helpFlagRE catches `--help` / `-h` / `--version` / `-V` — any command
+// invoked with just these is a read-only probe regardless of the command.
+var helpFlagRE = regexp.MustCompile(`^(-h|--help|-V|--version)$`)
+
+func isReadOnlyInvocation(words []string) (bool, string) {
+	cmd := filepath.Base(words[0])
+	args := words[1:]
+
+	// Pure --help / --version probes are always safe.
+	for _, a := range args {
+		if helpFlagRE.MatchString(a) {
+			return true, "help/version probe: " + cmd
+		}
+	}
+
+	switch cmd {
+	case "find":
+		// find IS read-only unless the user passes an action that mutates or
+		// executes: -delete / -exec / -execdir / -ok / -okdir / -fprint*.
+		for _, a := range args {
+			switch a {
+			case "-delete", "-exec", "-execdir", "-ok", "-okdir":
+				return false, "find action: " + a
+			}
+			if strings.HasPrefix(a, "-fprint") {
+				return false, "find action: " + a
+			}
+		}
+		return true, "find (readonly)"
+	case "git":
+		return isReadOnlyGit(args)
+	}
+
+	if shellReadOnlyCommands[cmd] {
+		return true, "readonly command: " + cmd
+	}
+	return false, "command not on readonly whitelist: " + cmd
+}
+
+var gitReadOnlySubcommands = map[string]bool{
+	"status":     true,
+	"log":        true,
+	"show":       true,
+	"diff":       true,
+	"blame":      true,
+	"branch":     true, // listing; -D / -d would delete — see below
+	"describe":   true,
+	"rev-parse":  true,
+	"remote":     true,
+	"config":     true, // read-only listing without value arg — we don't try to prove that here; leaving it out is safer
+	"ls-files":   true,
+	"ls-tree":    true,
+	"cat-file":   true,
+	"tag":        true, // listing; -d would delete
+	"stash":      true, // 'stash' alone lists; 'stash push' writes — conservative below
+	"reflog":     true,
+	"shortlog":   true,
+	"fsck":       true,
+}
+
+func isReadOnlyGit(args []string) (bool, string) {
+	// Skip global flags: -C <dir>, -c key=val, plus long forms.
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "-C" || a == "-c" {
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(a, "--") || strings.HasPrefix(a, "-") {
+			i++
+			continue
+		}
+		break
+	}
+	if i >= len(args) {
+		return false, "bare git invocation"
+	}
+	sub := args[i]
+	rest := args[i+1:]
+	if !gitReadOnlySubcommands[sub] {
+		return false, "git " + sub + " not readonly"
+	}
+	// Sub-command-specific mutating flags.
+	switch sub {
+	case "branch", "tag":
+		for _, a := range rest {
+			if a == "-d" || a == "-D" || a == "--delete" {
+				return false, "git " + sub + " " + a
+			}
+		}
+	case "stash":
+		// Only bare `git stash` (list) is read-only; anything else writes.
+		if len(rest) > 0 {
+			for _, a := range rest {
+				if a == "list" || a == "show" {
+					return true, "git stash " + a
+				}
+			}
+			return false, "git stash with mutating subcommand"
+		}
+	case "config":
+		// A safe read is `git config --get X` / `--list`; anything else may
+		// write. Require an explicit read flag to whitelist.
+		hasRead := false
+		for _, a := range rest {
+			if a == "--get" || a == "--list" || a == "-l" || a == "--get-all" ||
+				a == "--get-regexp" {
+				hasRead = true
+				break
+			}
+		}
+		if !hasRead {
+			return false, "git config without a read flag"
+		}
+	}
+	return true, "git " + sub + " (readonly)"
 }

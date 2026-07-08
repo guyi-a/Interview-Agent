@@ -446,7 +446,7 @@ func emitToolResult(
 		}))
 		if collector != nil {
 			if isRoot {
-				collector.finishLastTool(false, "", errMsg)
+				collector.finishTool(msg.ToolCallID, false, "", errMsg)
 				collector.AttachToolResult(ToolResultRecord{
 					CallID: msg.ToolCallID,
 					Name:   name,
@@ -480,7 +480,7 @@ func emitToolResult(
 	}))
 	if collector != nil {
 		if isRoot {
-			collector.finishLastTool(true, msg.Content, "")
+			collector.finishTool(msg.ToolCallID, true, msg.Content, "")
 			collector.AttachToolResult(ToolResultRecord{
 				CallID:  msg.ToolCallID,
 				Name:    name,

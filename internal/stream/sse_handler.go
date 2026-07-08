@@ -343,16 +343,21 @@ func (c *RunCollector) Turns() []TurnRecord {
 	return out
 }
 
-func (c *RunCollector) finishLastTool(ok bool, content, errMsg string) {
+func (c *RunCollector) finishTool(id string, ok bool, content, errMsg string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.tools) == 0 {
+	if id == "" {
 		return
 	}
-	last := &c.tools[len(c.tools)-1]
-	last.OK = ok
-	last.Content = content
-	last.Error = errMsg
+	for i := range c.tools {
+		if c.tools[i].ID != id {
+			continue
+		}
+		c.tools[i].OK = ok
+		c.tools[i].Content = content
+		c.tools[i].Error = errMsg
+		return
+	}
 }
 
 // Encode serializes a Frame into an SSE-formatted `data: ...\n\n` byte slice.
@@ -422,10 +427,10 @@ func NewSSEHandler(buf *StreamBuffer, collector *RunCollector) callbacks.Handler
 				Name:    info.Name,
 				OK:      boolPtr(true),
 				Content: content,
-			}))
-			if collector != nil {
-				collector.finishLastTool(true, content, "")
-			}
+				}))
+				if collector != nil {
+					collector.finishTool(id, true, content, "")
+				}
 			return ctx
 		}).
 		OnEndWithStreamOutputFn(func(ctx context.Context, info *callbacks.RunInfo, sr *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
@@ -491,7 +496,7 @@ func NewSSEHandler(buf *StreamBuffer, collector *RunCollector) callbacks.Handler
 					Error: err.Error(),
 				}))
 				if collector != nil {
-					collector.finishLastTool(false, "", err.Error())
+					collector.finishTool(id, false, "", err.Error())
 				}
 				return ctx
 			}

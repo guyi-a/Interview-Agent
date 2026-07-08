@@ -57,7 +57,12 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 		newWriteFileTool,
 		newChunkedWriteFileTool,
 		newEditFileTool,
+		newEditFileLinesTool,
 		newMkdirTool,
+		newRmTool,
+		newMvTool,
+		newCpTool,
+		newRunCommandTool,
 	} {
 		t, err := ctor(fs)
 		if err != nil {
