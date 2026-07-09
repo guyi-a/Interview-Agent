@@ -28,6 +28,7 @@ import (
 	"github.com/guyi-a/Interview-Agent/internal/repository"
 	"github.com/guyi-a/Interview-Agent/internal/service"
 	"github.com/guyi-a/Interview-Agent/internal/stream"
+	"github.com/guyi-a/Interview-Agent/internal/websearch"
 )
 
 const (
@@ -120,6 +121,7 @@ func main() {
 		BridgeService:    bridgeSvc,
 		SkillLoader:      skillLoader,
 		RAGRetriever:     buildRAGRetriever(cfg),
+		SearchService:    buildSearchService(cfg),
 	})
 	if err != nil {
 		log.Fatalf("tools.Builtin: %v", err)
@@ -223,4 +225,26 @@ func buildRAGRetriever(cfg *config.Config) ragretriever.Retriever {
 		ragretriever.NewBruteForce(ragDB, emb),
 		ragretriever.NewBM25(ragDB),
 	)
+}
+
+// buildSearchService 构造联网搜索的 Service。没配任何 Tavily/Bocha key 就
+// 返 nil，tools.Builtin 因此跳过 web_search 工具注册 —— agent 感知不到"联网
+// 搜索"能力。web_fetch 独立注册，不依赖 key。
+func buildSearchService(cfg *config.Config) *websearch.Service {
+	if !cfg.Search.Enabled() {
+		log.Printf("websearch: TAVILY_API_KEY / BOCHA_API_KEY 均未配置，web_search 工具未启用")
+		return nil
+	}
+	var enabled []string
+	if cfg.Search.TavilyAPIKey != "" {
+		enabled = append(enabled, "tavily")
+	}
+	if cfg.Search.BochaAPIKey != "" {
+		enabled = append(enabled, "bocha")
+	}
+	log.Printf("websearch: 启用 web_search，providers=%v", enabled)
+	return websearch.NewService(websearch.Config{
+		TavilyAPIKey: cfg.Search.TavilyAPIKey,
+		BochaAPIKey:  cfg.Search.BochaAPIKey,
+	})
 }

@@ -42,6 +42,7 @@ export type ChatTurn = {
   role: "user" | "assistant";
   content: string;
   reasoning: string;
+  streamPhase?: "thinking" | "text" | "tool";
   tools: ToolCall[];
   subEvents: SubAgentEvent[];
   createdAt: string;
@@ -305,6 +306,7 @@ async function runSSELoop(
           if (f.content)
             updateAssistant((t) => ({
               ...t,
+              streamPhase: "text",
               content: t.content + f.content,
             }));
           break;
@@ -312,11 +314,13 @@ async function runSSELoop(
           if (f.content)
             updateAssistant((t) => ({
               ...t,
+              streamPhase: "thinking",
               reasoning: t.reasoning + f.content,
             }));
           break;
         case "tool_call":
           if (f.id) {
+            updateAssistant((t) => ({ ...t, streamPhase: "tool" }));
             upsertTool(f.id, {
               name: f.name ?? "",
               argsJson: f.args_json ?? "",
@@ -326,6 +330,7 @@ async function runSSELoop(
           break;
         case "tool_result":
           if (f.id) {
+            updateAssistant((t) => ({ ...t, streamPhase: "tool" }));
             const status = normalizeToolStatus(
               undefined,
               f.ok,
@@ -362,13 +367,14 @@ async function runSSELoop(
         case "usage":
           break;
         case "done":
-          updateAssistant((t) => ({ ...t, done: true }));
+          updateAssistant((t) => ({ ...t, done: true, streamPhase: undefined }));
           finished = true;
           break;
         case "error":
           updateAssistant((t) => ({
             ...t,
             done: true,
+            streamPhase: undefined,
             error: f.message ?? "unknown error",
           }));
           onError(f.message ?? "unknown error");

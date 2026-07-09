@@ -12,6 +12,7 @@ import (
 	"github.com/guyi-a/Interview-Agent/internal/agent/skills"
 	"github.com/guyi-a/Interview-Agent/internal/rag/retriever"
 	"github.com/guyi-a/Interview-Agent/internal/repository"
+	"github.com/guyi-a/Interview-Agent/internal/websearch"
 )
 
 // Deps groups the dependencies the workspace + fs tools need at registration
@@ -25,6 +26,9 @@ type Deps struct {
 	SkillLoader      *skills.Loader
 	// RAGRetriever 可为 nil：nil 时 rag_search 工具不注册，agent 感知不到 RAG 存在。
 	RAGRetriever retriever.Retriever
+	// SearchService 可为 nil：nil（用户没配任何 Tavily/Bocha key）时 web_search
+	// 工具不注册，agent 感知不到联网搜索能力。web_fetch 独立注册（不依赖 key）。
+	SearchService *websearch.Service
 }
 
 // Builtin returns the full set of tools wired up with the given deps.
@@ -112,6 +116,22 @@ func Builtin(ctx context.Context, d Deps) ([]tool.BaseTool, error) {
 		}
 		out = append(out, rag)
 	}
+
+	// web_search 依赖 SearchService（跟 Tavily/Bocha key 绑定）—— 没配 key
+	// 就不注册，agent 感知不到"联网搜索"能力。web_fetch 独立注册，任何环境都能用。
+	if d.SearchService != nil {
+		ws, err := newWebSearchTool(d.SearchService)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ws)
+	}
+
+	wf, err := newWebFetchTool()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, wf)
 
 	return out, nil
 }

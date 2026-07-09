@@ -75,11 +75,24 @@ type RagConfig struct {
 	ChunkOverlap int
 }
 
+// SearchConfig 装联网搜索的 provider API keys。
+// Tavily / Bocha 任何一个配了就能用；两个都没配就不注册 web_search 工具（agent 感知不到）。
+// 环境变量名对齐 pentaloom：TAVILY_API_KEY / BOCHA_API_KEY，用户可以直接复用之前的配置。
+type SearchConfig struct {
+	TavilyAPIKey string
+	BochaAPIKey  string
+}
+
+func (c SearchConfig) Enabled() bool {
+	return c.TavilyAPIKey != "" || c.BochaAPIKey != ""
+}
+
 type Config struct {
 	LLM          LLMConfig
 	ApprovalFast ApprovalFastConfig
 	Embedding    EmbeddingConfig
 	Rag          RagConfig
+	Search       SearchConfig
 }
 
 func Load() (*Config, error) {
@@ -115,6 +128,10 @@ func Load() (*Config, error) {
 			DBPath:       getEnv("RAG_DB_PATH", "data/rag.db"),
 			ChunkSize:    getEnvInt("RAG_CHUNK_SIZE", 500),
 			ChunkOverlap: getEnvInt("RAG_CHUNK_OVERLAP", 80),
+		},
+		Search: SearchConfig{
+			TavilyAPIKey: os.Getenv("TAVILY_API_KEY"),
+			BochaAPIKey:  os.Getenv("BOCHA_API_KEY"),
 		},
 	}
 
