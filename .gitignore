@@ -49,7 +49,8 @@ temp/
 *.tmp
 
 # Project local data
-data/
+data/*
+!data/skills/
 *.db
 *.db-shm
 *.db-wal
@@ -57,7 +58,6 @@ data/
 
 # Local docs
 doc/
-docs/
 
 # TypeScript incremental build info
 *.tsbuildinfo
