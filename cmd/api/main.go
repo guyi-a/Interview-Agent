@@ -60,7 +60,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("config.Load: %v", err)
 	}
-	log.Printf("LLM cfg: model=%s thinking=%v", cfg.LLM.Model, cfg.LLM.EnableThinking)
+	log.Printf("LLM cfg: model=%s base=%s thinking=%v effort=%s",
+		cfg.LLM.Model, cfg.LLM.BaseURL, cfg.LLM.EnableThinking, cfg.LLM.ReasoningEffort)
 
 	ctx := context.Background()
 

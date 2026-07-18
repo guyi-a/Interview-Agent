@@ -8,7 +8,7 @@
 
 ## 功能一览
 
-- **Agent 对话** — 基于 [cloudwego/eino](https://github.com/cloudwego/eino) 编排，支持流式输出、多轮 thinking、工具调用。默认走 Anthropic 兼容协议，可指到 Novita/Anthropic/自建网关。
+- **Agent 对话** — 基于 [cloudwego/eino](https://github.com/cloudwego/eino) 编排，支持流式输出、多轮 thinking、工具调用。默认走 DeepSeek（OpenAI 兼容协议）。
 - **工具集**（`internal/agent/tools`）
   - 文件系统：`fs`、`fs_ops`、`fs_chunked_write`
   - Shell 执行：`shell`（带破坏性命令审批门槛）
@@ -32,7 +32,7 @@
 | 层 | 技术 |
 | --- | --- |
 | Backend | Go 1.26 · Gin · GORM · SQLite (glebarez/sqlite) · Eino |
-| LLM | Anthropic SDK (兼容 Novita / DeepSeek 等) |
+| LLM | DeepSeek（eino-ext OpenAI adapter） |
 | Frontend | React 19 · Vite 7 · TypeScript 5.9 · TailwindCSS 4 · Zustand |
 | Desktop | Electron 40 |
 | Storage | SQLite（对话 + 向量都在里面） |
@@ -81,7 +81,7 @@
 cp .env.example .env
 ```
 
-至少填一把 `ANTHROPIC_API_KEY`。想启用 RAG 就填 `EMBEDDING_API_KEY`；想让 agent 联网就填 `TAVILY_API_KEY` 或 `BOCHA_API_KEY`（两个都填能走 `region=both` 并发合并）。
+至少填一把 `DEEPSEEK_API_KEY`。想启用 RAG 就填 `EMBEDDING_API_KEY`；想让 agent 联网就填 `TAVILY_API_KEY` 或 `BOCHA_API_KEY`（两个都填能走 `region=both` 并发合并）。
 
 ```bash
 ./dev.sh
@@ -124,9 +124,9 @@ cd electron && pnpm start
 
 | 变量 | 作用 |
 | --- | --- |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` | 主 LLM（Anthropic 兼容） |
-| `ANTHROPIC_ENABLE_THINKING` / `ANTHROPIC_THINKING_BUDGET` | 是否启用思考 & 预算 |
-| `DEEPSEEK_API_KEY` / `APPROVAL_FAST_*` | 审批 auto 模式的快速分类器（OpenAI 兼容） |
+| `DEEPSEEK_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | 主 LLM（DeepSeek OpenAI 兼容） |
+| `LLM_ENABLE_THINKING` / `LLM_REASONING_EFFORT` | 是否启用思考 & effort（high/max） |
+| `APPROVAL_FAST_*` | 审批 auto 模式的快速分类器（共用 `DEEPSEEK_API_KEY`） |
 | `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | RAG 嵌入模型（默认 DashScope `text-embedding-v3`） |
 | `RAG_DOCS_DIR` / `RAG_DB_PATH` / `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | RAG 索引 & 检索参数 |
 | `TAVILY_API_KEY` / `BOCHA_API_KEY` | 联网搜索。全空则 `web_search` 工具不注册 |

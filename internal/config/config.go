@@ -10,27 +10,29 @@ import (
 )
 
 type LLMConfig struct {
-	APIKey         string
-	BaseURL        string
-	Model          string
-	MaxTokens      int
+	APIKey  string
+	BaseURL string
+	Model   string
+	MaxTokens int
+	// EnableThinking toggles DeepSeek thinking mode via
+	// extra_body {"thinking":{"type":"enabled|disabled"}}.
 	EnableThinking bool
-	ThinkingBudget int
-	// Multimodal reports whether the main model accepts Anthropic-shape
-	// image content blocks. Off by default because most non-Claude models
-	// available on our gateway either reject or silently ignore them.
-	// When off, upstream code (multimodal.BuildUserMessage) rewrites
-	// [image:] attachment markers into [file:] so they flow through the
-	// text-based OCR reader path instead.
+	// ReasoningEffort is DeepSeek's reasoning_effort ("high" / "max";
+	// "low"/"medium" are accepted for adapter compatibility and map to high
+	// on DeepSeek's side). Empty → "high" when thinking is on.
+	ReasoningEffort string
+	// Multimodal reports whether the main model accepts native image
+	// content blocks. Off by default — DeepSeek's OpenAI path is text-first;
+	// when off, multimodal.BuildUserMessage rewrites [image:] markers into
+	// [file:] so they flow through OCR instead.
 	Multimodal bool
 }
 
 // ApprovalFastConfig points at an OpenAI-compatible endpoint used by the
-// auto-mode approval classifier. Kept independent of LLMConfig because the
-// main model runs on the Anthropic protocol while the classifier here uses
-// the OpenAI chat/completions shape (DeepSeek by default). Missing APIKey
-// disables the classifier entirely — auto mode then only has the fast-path
-// rules to work with, and everything else falls through to human review.
+// auto-mode approval classifier. Shares DEEPSEEK_API_KEY with the main LLM
+// by default but keeps its own base URL / model so the classifier can stay
+// on a cheaper non-thinking model. Missing APIKey disables the classifier
+// entirely — auto mode then only has the fast-path rules to work with.
 type ApprovalFastConfig struct {
 	APIKey    string
 	BaseURL   string
@@ -98,18 +100,23 @@ type Config struct {
 func Load() (*Config, error) {
 	loadDotenv()
 
+	deepseekKey := os.Getenv("DEEPSEEK_API_KEY")
+	// Optional override so main agent and classifier can use different keys
+	// later without renaming the shared default.
+	llmKey := getEnv("LLM_API_KEY", deepseekKey)
+
 	cfg := &Config{
 		LLM: LLMConfig{
-			APIKey:         os.Getenv("ANTHROPIC_API_KEY"),
-			BaseURL:        os.Getenv("ANTHROPIC_BASE_URL"),
-			Model:          getEnv("ANTHROPIC_MODEL", "deepseek/deepseek-v4-pro"),
-			MaxTokens:      getEnvInt("ANTHROPIC_MAX_TOKENS", 8192),
-			EnableThinking: getEnvBool("ANTHROPIC_ENABLE_THINKING", true),
-			ThinkingBudget: getEnvInt("ANTHROPIC_THINKING_BUDGET", 4096),
-			Multimodal:     getEnvBool("LLM_MULTIMODAL", false),
+			APIKey:          llmKey,
+			BaseURL:         getEnv("LLM_BASE_URL", "https://api.deepseek.com"),
+			Model:           getEnv("LLM_MODEL", "deepseek-v4-pro"),
+			MaxTokens:       getEnvInt("LLM_MAX_TOKENS", 8192),
+			EnableThinking:  getEnvBool("LLM_ENABLE_THINKING", true),
+			ReasoningEffort: getEnv("LLM_REASONING_EFFORT", "high"),
+			Multimodal:      getEnvBool("LLM_MULTIMODAL", false),
 		},
 		ApprovalFast: ApprovalFastConfig{
-			APIKey:         os.Getenv("DEEPSEEK_API_KEY"),
+			APIKey:         deepseekKey,
 			BaseURL:        getEnv("APPROVAL_FAST_BASE_URL", "https://api.deepseek.com"),
 			Model:          getEnv("APPROVAL_FAST_MODEL", "deepseek-chat"),
 			MaxTokens:      getEnvInt("APPROVAL_FAST_MAX_TOKENS", 512),
@@ -136,14 +143,13 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.LLM.APIKey == "" {
-		return nil, fmt.Errorf("ANTHROPIC_API_KEY is required")
+		return nil, fmt.Errorf("DEEPSEEK_API_KEY (or LLM_API_KEY) is required")
 	}
 	if cfg.LLM.BaseURL == "" {
-		return nil, fmt.Errorf("ANTHROPIC_BASE_URL is required")
+		return nil, fmt.Errorf("LLM_BASE_URL is required")
 	}
-	if cfg.LLM.EnableThinking && cfg.LLM.ThinkingBudget >= cfg.LLM.MaxTokens {
-		return nil, fmt.Errorf("ANTHROPIC_THINKING_BUDGET (%d) must be < ANTHROPIC_MAX_TOKENS (%d)",
-			cfg.LLM.ThinkingBudget, cfg.LLM.MaxTokens)
+	if cfg.LLM.Model == "" {
+		return nil, fmt.Errorf("LLM_MODEL is required")
 	}
 	return cfg, nil
 }
